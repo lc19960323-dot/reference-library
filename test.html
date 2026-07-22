@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>JS Test</title></head>
+<body>
+<h1 id="status">JavaScript 未运行</h1>
+<button onclick="document.getElementById('status').textContent='JavaScript 正常工作！'">点我测试</button>
+<script>
+document.getElementById('status').textContent = 'JavaScript 已加载，等待点击…';
+try {
+  console.log('JS test: OK');
+  var idb = window.indexedDB;
+  document.getElementById('status').textContent += ' | IndexedDB: ' + (idb ? '可用' : '不可用');
+  var ls = window.localStorage;
+  document.getElementById('status').textContent += ' | localStorage: ' + (ls ? '可用' : '不可用');
+} catch(e) {
+  document.getElementById('status').textContent += ' | 错误: ' + e.message;
+}
+</script>
+</body>
+</html>

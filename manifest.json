@@ -1,0 +1,20 @@
+{
+  "name": "我的参考文献库",
+  "short_name": "文献库",
+  "description": "个人参考文献管理系统 - 支持学术论文、书籍、网页、古籍等多种类型，具备搜索、分类、引用格式生成等功能",
+  "start_url": "/index.html",
+  "display": "standalone",
+  "orientation": "any",
+  "theme_color": "#2563eb",
+  "background_color": "#f5f5f5",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["education", "utilities"],
+  "lang": "zh-CN"
+}
