@@ -3113,7 +3113,7 @@ async function processPdf(file) {
     // Also clean the assembled line text
     for (const pl of pageLines) pl.text = cleanPdfText(pl.text);
 
-    // Full text from first 3 pages for regex-based extraction
+    // Full text from first 3 pages + last page for regex-based extraction
     let fullText = '';
     const pagesToRead = Math.min(pdf.numPages, 3);
     for (let i = 1; i <= pagesToRead; i++) {
@@ -3121,12 +3121,20 @@ async function processPdf(file) {
       const tc = await pg.getTextContent();
       fullText += cleanPdfText(tc.items.map(it => it.str).join(' ')) + '\n\n';
     }
+    // Also read last page for ending page number and publication info
+    if (pdf.numPages > pagesToRead) {
+      try {
+        const lastPg = await pdf.getPage(pdf.numPages);
+        const lastTc = await lastPg.getTextContent();
+        fullText += cleanPdfText(lastTc.items.map(it => it.str).join(' ')) + '\n\n';
+      } catch(e) {}
+    }
 
     progressText.textContent = '正在智能识别...';
     progressFill.style.width = '60%';
 
     // Smart pre-fill: combine structural + regex + PDF metadata
-    const prefill = smartPrefillPdf(pageLines, fullText, pdf);
+    const prefill = await smartPrefillPdf(pageLines, fullText, pdf);
 
     progressFill.style.width = '90%';
 
@@ -3272,7 +3280,27 @@ function isJournalLine(text) {
   return false;
 }
 
-function smartPrefillPdf(pageLines, fullText, pdf) {
+// Convert Chinese numerals to Arabic number (e.g., 三十三 → 33)
+function chineseToNumber(cn) {
+  if (!cn) return 0;
+  const digitMap = { '〇': 0, '零': 0, '一': 1, '二': 2, '兩': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9 };
+  const unitMap = { '十': 10, '百': 100, '千': 1000 };
+  let result = 0;
+  let temp = 0;
+  for (const ch of cn) {
+    if (digitMap[ch] !== undefined) {
+      temp = digitMap[ch];
+    } else if (unitMap[ch] !== undefined) {
+      if (temp === 0) temp = 1; // handle 十X → 10+X
+      result += temp * unitMap[ch];
+      temp = 0;
+    }
+  }
+  result += temp;
+  return result;
+}
+
+async function smartPrefillPdf(pageLines, fullText, pdf) {
   const result = {
     title: '', authors: '', journal: '', year: '',
     volume: '', issue: '', pages: '', doi: '',
@@ -3327,13 +3355,120 @@ function smartPrefillPdf(pageLines, fullText, pdf) {
     }
   }
 
-  // Volume/Issue/Pages
+  // Volume/Issue/Pages (Western format)
   const volMatch = fullText.match(/(?:Vol\.?\s*|Volume\s*|第\s*\d+\s*卷|第.*卷)[:\s]*(\d+)/i);
   if (volMatch) result.volume = volMatch[1];
   const issueMatch = fullText.match(/(?:No\.?\s*|Issue\s*|Number\s*|第\s*\d+\s*期|第.*期)[:\s]*(\d+|[A-Z])/i);
   if (issueMatch) result.issue = issueMatch[1];
   const pagesMatch = fullText.match(/(?:pp\.?\s*|pages\s*|\s)(\d+\s*[-–—]\s*\d+)/i);
   if (pagesMatch) result.pages = pagesMatch[1].replace(/\s/g, '');
+
+  // Chinese/Taiwan academic citation format extraction
+  // Pattern: 《期刊名》卷（年）：页码  e.g., 《法制史研究》33（2018）：175-238
+  // Also: 《期刊名》卷（年.月）：页码  e.g., 《法制史研究》33（2018.6）：175-238
+  // Also: 《期刊名》第卷期（年）：页码
+  const cnCitePattern1 = /《([^》]{2,30})》\s*(?:第)?(\d+)(?:期)?\s*[（(](\d{4})(?:\.\d+)?[）)]\s*[：:]\s*(\d+\s*[-–—]\s*\d+)/;
+  const cnCiteMatch1 = fullText.match(cnCitePattern1);
+  if (cnCiteMatch1) {
+    if (!result.journal) result.journal = cnCiteMatch1[1].trim();
+    if (!result.volume) result.volume = cnCiteMatch1[2];
+    if (!result.year) result.year = cnCiteMatch1[3];
+    if (!result.pages) result.pages = cnCiteMatch1[4].replace(/\s/g, '');
+    console.log('[PDF] Found Chinese citation format (journal+vol+year+pages):', cnCiteMatch1[0]);
+  }
+
+  // Also try the full citation format: 作者，〈标题〉，《期刊》卷（年）：页码
+  const fullCite = parseCitationFromText(fullText);
+  if (fullCite) {
+    if (!result.journal && fullCite.journal) result.journal = fullCite.journal;
+    if (!result.volume && fullCite.volume) result.volume = fullCite.volume;
+    if (!result.year && fullCite.year) result.year = fullCite.year;
+    if (!result.pages && fullCite.pages) result.pages = fullCite.pages;
+    if (!result.authors && fullCite.author) result.authors = fullCite.author;
+    if (!result.title && fullCite.title) result.title = fullCite.title;
+    console.log('[PDF] Found full citation format in text:', fullCite);
+  }
+
+  // Also search for journal name in 《》 that might not have the full citation pattern
+  // e.g., page headers/footers: 《法制史研究》第33期
+  if (!result.journal) {
+    const journalInText = fullText.match(/《([\u4e00-\u9fff]{2,20})》/);
+    if (journalInText) {
+      result.journal = journalInText[1];
+      console.log('[PDF] Found journal name in text:', journalInText[1]);
+    }
+  }
+
+  // Search for year in parentheses after a number (common in Taiwan journal format)
+  // e.g., "33（2018）" or "33(2018)"
+  if (!result.year || !result.volume) {
+    const volYearPattern = /(\d+)\s*[（(](\d{4})[）)]/;
+    const volYearMatch = fullText.match(volYearPattern);
+    if (volYearMatch) {
+      if (!result.volume) result.volume = volYearMatch[1];
+      if (!result.year) result.year = volYearMatch[2];
+    }
+  }
+
+  // Search for pages pattern: 数字-数字 near the end of text (footer area)
+  if (!result.pages) {
+    const pagesPattern = /(\d{1,4}\s*[-–—]\s*\d{1,4})/g;
+    const allPages = [...fullText.matchAll(pagesPattern)];
+    if (allPages.length > 0) {
+      // Take the last page range found (usually in footer)
+      const lastPages = allPages[allPages.length - 1][1].replace(/\s/g, '');
+      // Only accept if it looks like page numbers (not too large)
+      const [start, end] = lastPages.split(/[-–—]/).map(Number);
+      if (start > 0 && end > start && end < 10000) {
+        result.pages = lastPages;
+      }
+    }
+  }
+
+  // Extract issue number from Chinese numeral format: 第三十三期 → 33
+  if (!result.issue) {
+    const cnIssueMatch = fullText.match(/第([一二三四五六七八九十百千零〇兩]+)期/);
+    if (cnIssueMatch) {
+      const issueNum = chineseToNumber(cnIssueMatch[1]);
+      if (issueNum > 0) {
+        result.issue = String(issueNum);
+        // Also set as volume if no volume found (Taiwan journals often use 期 as volume)
+        if (!result.volume) result.volume = String(issueNum);
+        console.log('[PDF] Converted Chinese numeral issue:', cnIssueMatch[1], '→', issueNum);
+      }
+    }
+  }
+
+  // Extract page numbers from page headers/footers
+  // Taiwan journal pattern: "176 《法制史研究》第三十三期" (even pages)
+  //                        "清代中央繫獄諸神考 177" (odd pages)
+  if (!result.pages) {
+    // Find page numbers before 《journal name》
+    const pageBeforeJournal = [...fullText.matchAll(/(\d{2,4})\s*《[^》]{2,20}》/g)]
+      .map(m => parseInt(m[1]))
+      .filter(n => n >= 10 && n <= 9999);
+    // Find page numbers after the paper title
+    const titleForPages = result.title || '';
+    const pageAfterTitle = titleForPages ?
+      [...fullText.matchAll(new RegExp(
+        titleForPages.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').substring(0, 20) + '\\s+(\\d{2,4})', 'g'
+      ))].map(m => parseInt(m[1])).filter(n => n >= 10 && n <= 9999) : [];
+
+    const allPageNums = [...pageBeforeJournal, ...pageAfterTitle];
+    if (allPageNums.length >= 2) {
+      const minPage = Math.min(...allPageNums);
+      const maxPage = Math.max(...allPageNums);
+      if (maxPage > minPage) {
+        result.pages = `${minPage}-${maxPage}`;
+        console.log('[PDF] Extracted page range from headers:', result.pages, '(from', allPageNums.length, 'page numbers)');
+      }
+    } else if (allPageNums.length === 1 && pageBeforeJournal.length > 0) {
+      // If we only have even-page numbers, estimate starting page as minPage - 1
+      // and ending page from the last page text
+      result.pages = `${pageBeforeJournal[0] - 1}-?`;
+      console.log('[PDF] Partial page info from headers:', result.pages);
+    }
+  }
 
   // === STEP 2: Find section boundaries on first page ===
   let abstractLineIdx = -1, keywordsLineIdx = -1, introLineIdx = -1, clcLineIdx = -1;
@@ -3472,35 +3607,56 @@ function smartPrefillPdf(pageLines, fullText, pdf) {
 
   // === STEP 5: PDF embedded metadata as fallback ===
   try {
-    pdf.getMetadata().then(meta => {
-      if (meta && meta.info) {
-        if (!result.title && meta.info.Title) {
-          const titleCandidate = meta.info.Title.trim();
-          // Reject obvious non-title patterns: Word filenames, Office metadata, generic labels
-          const isBadTitle = /\.(pdf|doc|docx|docm|dotx|rtf|wps)$/i.test(titleCandidate) ||
-            /^Microsoft Word/i.test(titleCandidate) ||
-            /^Untitled/i.test(titleCandidate) ||
-            /^(Final|Draft|Copy|Version|Revision|Paper|Article|Thesis)/i.test(titleCandidate) && titleCandidate.length < 20 ||
-            /^zz?\d/i.test(titleCandidate) ||
-            /^[a-z]-\w{2,4}-/i.test(titleCandidate) && titleCandidate.length < 30;
-          if (!isBadTitle && titleCandidate.length >= 3) {
-            result.title = titleCandidate;
-          }
-        }
-        if (!result.authors && meta.info.Author) {
-          const cleaned = meta.info.Author.trim().replace(/[¹²³⁴⁵⁶⁷⁸⁹⁰\d*†‡]/g, '').trim();
-          // Author names should be SHORT — max 60 chars for a name list
-          // Reject anything that looks like a sentence or abstract
-          // Reject generic/system usernames like "user", "admin", "author", "default"
-          const isGenericUser = /^(user|admin|author|default|system|guest|test|unknown|none|n\/a|anonymous)$/i.test(cleaned);
-          if (!isGenericUser && cleaned.length >= 2 && cleaned.length <= 60 &&
-              !/[。！？]/.test(cleaned) &&
-              !sentenceMarkersForPdf.test(cleaned)) {
-            result.authors = cleaned;
+    const meta = await pdf.getMetadata();
+    if (meta && meta.info) {
+      // Extract year from CreationDate: "D:20180905162812+08'00'" → 2018
+      if (!result.year && meta.info.CreationDate) {
+        const dateMatch = meta.info.CreationDate.match(/D:(\d{4})/);
+        if (dateMatch) {
+          const yr = parseInt(dateMatch[1]);
+          if (yr >= 1900 && yr <= new Date().getFullYear() + 1) {
+            result.year = dateMatch[1];
+            console.log('[PDF] Extracted year from CreationDate:', dateMatch[1]);
           }
         }
       }
-    }).catch(() => {});
+      // Also try ModDate if CreationDate didn't work
+      if (!result.year && meta.info.ModDate) {
+        const dateMatch = meta.info.ModDate.match(/D:(\d{4})/);
+        if (dateMatch) {
+          const yr = parseInt(dateMatch[1]);
+          if (yr >= 1900 && yr <= new Date().getFullYear() + 1) {
+            result.year = dateMatch[1];
+            console.log('[PDF] Extracted year from ModDate:', dateMatch[1]);
+          }
+        }
+      }
+      if (!result.title && meta.info.Title) {
+        const titleCandidate = meta.info.Title.trim();
+        // Reject obvious non-title patterns: Word filenames, Office metadata, generic labels
+        const isBadTitle = /\.(pdf|doc|docx|docm|dotx|rtf|wps)$/i.test(titleCandidate) ||
+          /^Microsoft Word/i.test(titleCandidate) ||
+          /^Untitled/i.test(titleCandidate) ||
+          /^(Final|Draft|Copy|Version|Revision|Paper|Article|Thesis)/i.test(titleCandidate) && titleCandidate.length < 20 ||
+          /^zz?\d/i.test(titleCandidate) ||
+          /^[a-z]-\w{2,4}-/i.test(titleCandidate) && titleCandidate.length < 30;
+        if (!isBadTitle && titleCandidate.length >= 3) {
+          result.title = titleCandidate;
+        }
+      }
+      if (!result.authors && meta.info.Author) {
+        const cleaned = meta.info.Author.trim().replace(/[¹²³⁴⁵⁶⁷⁸⁹⁰\d*†‡]/g, '').trim();
+        // Author names should be SHORT — max 60 chars for a name list
+        // Reject anything that looks like a sentence or abstract
+        // Reject generic/system usernames like "user", "admin", "author", "default"
+        const isGenericUser = /^(user|admin|author|default|system|guest|test|unknown|none|n\/a|anonymous)$/i.test(cleaned);
+        if (!isGenericUser && cleaned.length >= 2 && cleaned.length <= 60 &&
+            !/[。！？]/.test(cleaned) &&
+            !sentenceMarkersForPdf.test(cleaned)) {
+          result.authors = cleaned;
+        }
+      }
+    }
   } catch(e) {}
 
   return result;
