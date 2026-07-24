@@ -3204,23 +3204,51 @@ async function smartPrefillPdf(pageLines, fullText, pdf) {
     }
   }
 
-  // Volume/Issue/Pages (Western format)
-  const volMatch = fullText.match(/(?:Vol\.?\s*|Volume\s*|第\s*\d+\s*卷|第.*卷)[:\s]*(\d+)/i);
+  // Volume/Issue/Pages
+  // Western format: Vol. 33, No. 2, Issue 4 — number comes AFTER the keyword
+  const volMatch = fullText.match(/(?:Vol\.?\s*|Volume\s*)[:\s]*(\d+)/i);
   if (volMatch) result.volume = volMatch[1];
-  const issueMatch = fullText.match(/(?:No\.?\s*|Issue\s*|Number\s*|第\s*\d+\s*期|第.*期)[:\s]*(\d+|[A-Z])/i);
+  const issueMatch = fullText.match(/(?:No\.?\s*|Issue\s*|Number\s*)[:\s]*(\d+|[A-Z])/i);
   if (issueMatch) result.issue = issueMatch[1];
   const pagesMatch = fullText.match(/(?:pp\.?\s*|pages\s*|\s)(\d+\s*[-–—]\s*\d+)/i);
   if (pagesMatch) result.pages = pagesMatch[1].replace(/\s/g, '');
+
+  // Chinese format: 第33期, 第三十三期, 第33卷, 第三十三卷
+  // The number is BETWEEN 第 and 期/卷 (NOT after)
+  if (!result.volume) {
+    const cnVolMatch = fullText.match(/第\s*(\d+|[一二三四五六七八九十百千零〇兩]+)\s*卷/);
+    if (cnVolMatch) {
+      const v = /^\d+$/.test(cnVolMatch[1]) ? parseInt(cnVolMatch[1]) : chineseToNumber(cnVolMatch[1]);
+      if (v > 0) result.volume = String(v);
+      console.log('[PDF] Extracted volume from 第X卷:', cnVolMatch[0], '→', v);
+    }
+  }
+  if (!result.issue) {
+    const cnIssueMatch2 = fullText.match(/第\s*(\d+|[一二三四五六七八九十百千零〇兩]+)\s*期/);
+    if (cnIssueMatch2) {
+      const iss = /^\d+$/.test(cnIssueMatch2[1]) ? parseInt(cnIssueMatch2[1]) : chineseToNumber(cnIssueMatch2[1]);
+      if (iss > 0) {
+        result.issue = String(iss);
+        // Taiwan journals often use 期 as volume too (e.g., 法制史研究第三十三期 = vol.33)
+        if (!result.volume) result.volume = String(iss);
+        console.log('[PDF] Extracted issue from 第X期:', cnIssueMatch2[0], '→', iss);
+      }
+    }
+  }
 
   // Chinese/Taiwan academic citation format extraction
   // Pattern: 《期刊名》卷（年）：页码  e.g., 《法制史研究》33（2018）：175-238
   // Also: 《期刊名》卷（年.月）：页码  e.g., 《法制史研究》33（2018.6）：175-238
   // Also: 《期刊名》第卷期（年）：页码
-  const cnCitePattern1 = /《([^》]{2,30})》\s*(?:第)?(\d+)(?:期)?\s*[（(](\d{4})(?:\.\d+)?[）)]\s*[：:]\s*(\d+\s*[-–—]\s*\d+)/;
+  // Also supports Chinese numerals: 《法制史研究》第三十三期（2018）：175-238
+  const cnCitePattern1 = /《([^》]{2,30})》\s*(?:第)?(\d+|[一二三四五六七八九十百千零〇兩]+)(?:期)?\s*[（(](\d{4})(?:\.\d+)?[）)]\s*[：:]\s*(\d+\s*[-–—]\s*\d+)/;
   const cnCiteMatch1 = fullText.match(cnCitePattern1);
   if (cnCiteMatch1) {
     if (!result.journal) result.journal = cnCiteMatch1[1].trim();
-    if (!result.volume) result.volume = cnCiteMatch1[2];
+    const volStr = cnCiteMatch1[2];
+    const volNum = /^\d+$/.test(volStr) ? parseInt(volStr) : chineseToNumber(volStr);
+    if (!result.volume && volNum > 0) result.volume = String(volNum);
+    if (!result.issue && volNum > 0 && /期/.test(cnCiteMatch1[0])) result.issue = String(volNum);
     if (!result.year) result.year = cnCiteMatch1[3];
     if (!result.pages) result.pages = cnCiteMatch1[4].replace(/\s/g, '');
     console.log('[PDF] Found Chinese citation format (journal+vol+year+pages):', cnCiteMatch1[0]);
@@ -3274,19 +3302,8 @@ async function smartPrefillPdf(pageLines, fullText, pdf) {
     }
   }
 
-  // Extract issue number from Chinese numeral format: 第三十三期 → 33
-  if (!result.issue) {
-    const cnIssueMatch = fullText.match(/第([一二三四五六七八九十百千零〇兩]+)期/);
-    if (cnIssueMatch) {
-      const issueNum = chineseToNumber(cnIssueMatch[1]);
-      if (issueNum > 0) {
-        result.issue = String(issueNum);
-        // Also set as volume if no volume found (Taiwan journals often use 期 as volume)
-        if (!result.volume) result.volume = String(issueNum);
-        console.log('[PDF] Converted Chinese numeral issue:', cnIssueMatch[1], '→', issueNum);
-      }
-    }
-  }
+  // Note: Chinese numeral issue extraction (第三十三期 → 33) is now handled
+  // earlier in the unified 第X期/第X卷 extraction block above.
 
   // Extract page numbers from page headers/footers
   // Taiwan journal pattern: "176 《法制史研究》第三十三期" (even pages)
@@ -5345,15 +5362,28 @@ async function autoEnrichReference(metadata) {
       handler: async () => {
         const results = await searchOpenAlexWorks(webQuery, 10);
         const firstAuthor = metadata.authors ? metadata.authors.split(/[,，]/)[0].trim() : '';
+
+        // FILTER OpenAlex results by title similarity to avoid irrelevant matches
+        // Only keep results that share meaningful overlap with the paper title
+        const filteredResults = results.filter(r => {
+          if (!r.title) return false;
+          const score = titleSimilarity(metadata.title, r.title);
+          // Also check if author name appears in the result
+          const authorMatch = firstAuthor && r.snippet && r.snippet.includes(firstAuthor);
+          return score >= 0.15 || authorMatch;
+        });
+        console.log(`[Enrichment] OpenAlex works: ${results.length} raw → ${filteredResults.length} after relevance filter`);
+
+        // Search links are always relevant (they're just links to search engines)
         const searchLinks = generatePaperSearchLinks(metadata.title, firstAuthor);
-        const allResults = [...results, ...searchLinks];
+        const allResults = [...filteredResults, ...searchLinks];
         if (allResults.length > 0) {
           apiData.apiSources.push('OpenAlex论文搜索');
           apiData.webSearchResults = allResults;
           foundSomething = true;
         }
-        // Extract structured metadata from OpenAlex results
-        for (const r of results) {
+        // Extract structured metadata from the BEST matching OpenAlex result
+        for (const r of filteredResults) {
           if (r._meta) {
             const m = r._meta;
             if (m.authors && !enriched.authors && !metadata.authors) { enriched.authors = m.authors; foundSomething = true; }
@@ -5373,7 +5403,7 @@ async function autoEnrichReference(metadata) {
           'muse.jhu.edu': 3, 'cnki.com.cn': 3, 'wanfangdata.com.cn': 3,
           'ir.sinica.edu.tw': 4,
         };
-        const academicUrls = results
+        const academicUrls = filteredResults
           .map(r => r.url)
           .filter(url => Object.keys(domainPriority).some(d => url.includes(d)))
           .filter(url => !url.endsWith('.pdf'))
@@ -5572,15 +5602,23 @@ async function autoEnrichReference(metadata) {
       url: 'skip',
       handler: async () => {
         const tradResults = await searchOpenAlexWorks(tradWebQuery, 10);
-        if (tradResults.length > 0) {
+        // FILTER by title similarity to avoid irrelevant matches
+        const tradFiltered = tradResults.filter(r => {
+          if (!r.title) return false;
+          const score = titleSimilarity(tradMetadata.title, r.title);
+          const authorMatch = tradMetadata.authors && r.snippet && r.snippet.includes(tradMetadata.authors.split(/[,，;；]/)[0].trim());
+          return score >= 0.15 || authorMatch;
+        });
+        console.log(`[Enrichment] OpenAlex 繁體: ${tradResults.length} raw → ${tradFiltered.length} after filter`);
+        if (tradFiltered.length > 0) {
           apiData.apiSources.push('OpenAlex(繁體)');
           const existing = apiData.webSearchResults || [];
           const seen = new Set(existing.map(r => r.url.split('?')[0]));
-          const newResults = tradResults.filter(r => !seen.has(r.url.split('?')[0]));
+          const newResults = tradFiltered.filter(r => !seen.has(r.url.split('?')[0]));
           apiData.webSearchResults = [...existing, ...newResults].slice(0, 15);
           foundSomething = true;
           // Extract metadata from OpenAlex structured data
-          for (const r of tradResults) {
+          for (const r of tradFiltered) {
             if (r._meta) {
               const m = r._meta;
               if (m.journal && !enriched.journal && !metadata.journal) { enriched.journal = m.journal; foundSomething = true; }
@@ -5592,7 +5630,7 @@ async function autoEnrichReference(metadata) {
             }
           }
           // Try to extract citation meta from academic pages
-          const academicUrls = tradResults
+          const academicUrls = tradFiltered
             .map(r => r.url)
             .filter(url => ['lawdata.com.tw', 'airitilibrary.com', 'sinica.edu.tw', 'tandfonline.com', 'jstor.org'].some(d => url.includes(d)))
             .filter(url => !url.endsWith('.pdf'))
@@ -5745,21 +5783,33 @@ async function autoEnrichReference(metadata) {
       // NOT useProxy — DuckDuckGo API is CORS-friendly!
       handler: async (data) => {
         const results = [];
-        // Abstract (main answer)
+        // Build a relevance check: title keywords and author name
+        const titleLower = (metadata.title || '').toLowerCase();
+        const authorLower = metadata.authors ? metadata.authors.split(/[,，;；]/)[0].trim().toLowerCase() : '';
+        const titleKeywords = titleLower.split(/[\s,，。、：:；;（）()《》〈〉「」"'']+|/).filter(w => w.length >= 2);
+        const isRelevant = (text) => {
+          if (!text) return false;
+          const tl = text.toLowerCase();
+          // Must contain at least one title keyword or the author name
+          if (authorLower && tl.includes(authorLower)) return true;
+          return titleKeywords.some(kw => tl.includes(kw));
+        };
+
+        // Abstract (main answer) — always relevant if present
         if (data.Abstract && data.AbstractURL) {
           results.push({ title: data.AbstractTitle || data.Abstract.substring(0, 80), url: data.AbstractURL, snippet: data.Abstract, engine: 'DuckDuckGo' });
           if (!enriched.abstract && !metadata.abstract) { enriched.abstract = data.Abstract; foundSomething = true; }
         }
-        // Related topics
+        // Related topics — FILTER by relevance to avoid unrelated results
         if (data.RelatedTopics) {
-          for (const topic of data.RelatedTopics.slice(0, 5)) {
-            if (topic.Text && topic.FirstURL) {
+          for (const topic of data.RelatedTopics.slice(0, 8)) {
+            if (topic.Text && topic.FirstURL && isRelevant(topic.Text)) {
               results.push({ title: topic.Text.substring(0, 80), url: topic.FirstURL, snippet: topic.Text, engine: 'DuckDuckGo' });
             }
           }
         }
-        // Definition
-        if (data.Definition && data.DefinitionURL) {
+        // Definition — only include if relevant
+        if (data.Definition && data.DefinitionURL && isRelevant(data.Definition)) {
           results.push({ title: data.Definition.substring(0, 80), url: data.DefinitionURL, snippet: data.Definition, engine: 'DuckDuckGo' });
         }
         if (results.length > 0) {
