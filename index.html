@@ -5477,7 +5477,8 @@ async function autoEnrichReference(metadata) {
     }
   }
 
-  // Query 12: Author academic homepage search via Bing RSS
+  // Query 12: Author academic homepage search via OpenAlex + academic links
+  // NOTE: Bing RSS search is broken (returns random results), so we use OpenAlex API instead
   if (metadata.authors) {
     const firstAuthor = metadata.authors.split(/[,，;；]/)[0].trim();
     if (firstAuthor.length >= 2) {
@@ -5485,104 +5486,65 @@ async function autoEnrichReference(metadata) {
         name: '作者学术主页搜索',
         url: 'skip',
         handler: async () => {
-          // Strategy: search author name + academic role terms
-          // These are the terms that appear on actual Chinese academic profile pages
-          const searchQueries = [
-            `"${firstAuthor}" 教授`,
-            `"${firstAuthor}" 研究員`,
-          ];
+          const results = [];
 
-          // Collect results from both queries
-          const allResults = [];
-          for (const sq of searchQueries) {
-            const results = await searchBingRSS(sq, 5);
-            allResults.push(...results);
-          }
-          console.log('[Enrichment] Author search raw results:', allResults.length);
+          // 1. Search OpenAlex for author and fetch their recent works
+          try {
+            const authorSearchUrl = `https://api.openalex.org/authors?search=${encodeURIComponent(firstAuthor)}&per_page=1&mailto=research@example.com`;
+            const authorRes = await fetchWithTimeout(authorSearchUrl, {}, 10000);
+            if (authorRes.ok) {
+              const authorData = await authorRes.json();
+              if (authorData.results && authorData.results.length > 0) {
+                const author = authorData.results[0];
+                const authorId = author.id.replace('https://openalex.org/', '');
+                console.log('[Enrichment] Found author on OpenAlex:', author.display_name, 'ID:', authorId);
 
-          // Academic domain list — results from these domains are highly relevant
-          const academicDomains = [
-            'edu.tw', 'edu.cn', 'edu.hk', 'edu.sg', 'edu.au', 'edu.jp',
-            'sinica.edu.tw', 'ntu.edu.tw', 'nccu.edu.tw', 'nthu.edu.tw',
-            'ncku.edu.tw', 'ntnu.edu.tw', 'fcu.edu.tw', 'nchu.edu.tw',
-            'scholar.google', 'researchgate.net', 'academia.edu',
-            'lawdata.com.tw', 'airitilibrary.com', 'hyread.com.tw',
-            'th.gov.tw', 'ihp.sinica.edu.tw', 'ccs.nccu.edu.tw',
-            'portal.gov.tw', 'most.gov.tw', 'ncl.edu.tw',
-            'pku.edu.cn', 'tsinghua.edu.cn', 'fudan.edu.cn',
-          ];
-
-          // Domains that are NOT academic homepages — exclude
-          const excludeDomains = [
-            'youtube.com', 'facebook.com', 'twitter.com', 'instagram.com',
-            'tiktok.com', 'pinterest.com', 'reddit.com',
-            'shopee', 'taobao', 'amazon', 'ebay',
-            'wikimedia.org', 'wikipedia.org',
-            'news.', 'blog.', 'blogger.',
-          ];
-
-          // Also generate simplified Chinese variant of author name for matching
-          // (Bing may return results in either traditional or simplified)
-          const tradToSimp = { '陳':'陈','遠':'远','華':'华','東':'东','學':'学','經':'经','論':'论',
-            '萬':'万','圖':'图','開':'开','應':'应','節':'节','說':'说','製':'制','記':'记',
-            '傳':'传','書':'书','畫':'画','藝':'艺','術':'术','動':'动','態':'态','當':'当',
-            '關':'关','係':'系','發':'发','達':'达','變':'变','體':'体','會':'会','員':'员',
-            '員':'员','區':'区','農':'农','運':'运','歷':'历','憲':'宪','觀':'观','點':'点',
-            '黨':'党','國':'国','場':'场','員':'员','檔':'档','案':'案','壓':'压','壞':'坏',
-            '繫':'系','獄':'狱','諸':'诸','考':'考','清':'清','代':'代','中':'中','央':'央',
-            '熙':'熙','漢':'汉','語':'语','歷':'历','史':'史','研':'研','究':'究','所':'所' };
-          let firstAuthorSimp = '';
-          for (const ch of firstAuthor) {
-            firstAuthorSimp += tradToSimp[ch] || ch;
+                // Fetch author's recent works
+                const worksUrl = `https://api.openalex.org/works?filter=author.id:${authorId}&per_page=5&sort=publication_date:desc&mailto=research@example.com`;
+                const worksRes = await fetchWithTimeout(worksUrl, {}, 10000);
+                if (worksRes.ok) {
+                  const worksData = await worksRes.json();
+                  for (const work of (worksData.results || [])) {
+                    const title = work.title || '';
+                    let workUrl = work.doi || '';
+                    if (!workUrl && work.primary_location && work.primary_location.landing_page) {
+                      workUrl = work.primary_location.landing_page.url || '';
+                    }
+                    if (!workUrl) workUrl = work.id || '';
+                    const year = work.publication_year || '';
+                    const venue = (work.primary_location && work.primary_location.source) ? (work.primary_location.source.display_name || '') : '';
+                    const cited = work.cited_by_count || 0;
+                    const snippetParts = [];
+                    if (year) snippetParts.push(String(year));
+                    if (venue) snippetParts.push(venue);
+                    if (cited) snippetParts.push(`被引${cited}次`);
+                    const snippet = snippetParts.join(' · ');
+                    if (title) {
+                      results.push({ title, url: workUrl, snippet, engine: 'OpenAlex(作者作品)' });
+                    }
+                  }
+                  console.log('[Enrichment] Author works from OpenAlex:', results.length, 'works');
+                }
+              }
+            }
+          } catch(e) {
+            console.log('[Enrichment] OpenAlex author works search failed:', e.message);
           }
 
-          // Deduplicate and filter
-          const seen = new Set();
-          const scored = allResults.map(r => {
-            const urlKey = r.url.split('?')[0].toLowerCase();
-            if (seen.has(urlKey)) return null;
-            seen.add(urlKey);
+          // 2. Generate direct academic search/profile links
+          const encName = encodeURIComponent(firstAuthor);
+          const academicLinks = [
+            { title: `Google Scholar 搜索「${firstAuthor}」`, url: `https://scholar.google.com/scholar?q=${encName}`, snippet: '在 Google Scholar 上搜索此作者的论文', engine: '学术搜索链接' },
+            { title: `Google Scholar 作者档案搜索「${firstAuthor}」`, url: `https://scholar.google.com/citations?view_op=search_authors&mauthors=${encName}`, snippet: '查找此作者的 Google Scholar 学术档案', engine: '学术搜索链接' },
+            { title: `ResearchGate 搜索「${firstAuthor}」`, url: `https://www.researchgate.net/search/authors?q=${encName}`, snippet: '在 ResearchGate 上搜索此作者', engine: '学术搜索链接' },
+            { title: `Academia.edu 搜索「${firstAuthor}」`, url: `https://www.academia.edu/search?q=${encName}`, snippet: '在 Academia.edu 上搜索此作者', engine: '学术搜索链接' },
+          ];
+          results.push(...academicLinks);
 
-            // Exclude non-academic domains
-            if (excludeDomains.some(d => r.url.includes(d))) return null;
-
-            // Check if author name appears (try both traditional and simplified)
-            const authorInTitle = r.title.includes(firstAuthor) || r.title.includes(firstAuthorSimp);
-            const authorInSnippet = r.snippet.includes(firstAuthor) || r.snippet.includes(firstAuthorSimp);
-            if (!authorInTitle && !authorInSnippet) return null;
-
-            // Score the result
-            let score = 0;
-            const isAcademicDomain = academicDomains.some(d => r.url.includes(d));
-            if (isAcademicDomain) score += 10;
-            if (authorInTitle) score += 5;
-            if (authorInSnippet) score += 2;
-
-            // Profile-related keywords in title (strong signal)
-            const profileKeywords = ['教授', '研究員', '研究员', '副教授', '助理教授',
-              '博士生', '導師', '导师', 'faculty', 'professor', 'profile', '簡歷', '履历',
-              '著作目錄', 'publications', 'scholar', '專任', '兼任', 'lecturer'];
-            if (profileKeywords.some(k => r.title.includes(k))) score += 5;
-            if (profileKeywords.some(k => r.snippet.includes(k))) score += 2;
-
-            // University/institute keywords in snippet
-            const instituteKeywords = ['大學', '大学', '研究所', '研究院', '學院', '学院',
-              'university', 'institute', 'college', 'department'];
-            if (instituteKeywords.some(k => r.snippet.includes(k))) score += 3;
-
-            return { result: r, score };
-          }).filter(x => x !== null && x.score > 0);
-
-          // Sort by score descending
-          scored.sort((a, b) => b.score - a.score);
-
-          const finalResults = scored.slice(0, 5).map(x => x.result);
-          if (finalResults.length > 0) {
+          if (results.length > 0) {
             apiData.apiSources.push('作者学术主页搜索');
-            apiData.authorWebResults = finalResults.map(r => ({ ...r, engine: 'Bing RSS(作者)' }));
-            console.log('[Enrichment] Author web search results:', finalResults.length, 'items (from', allResults.length, 'raw, scores:', scored.map(x=>x.score).join(','), ')');
-          } else {
-            console.log('[Enrichment] Author web search: no relevant results after scoring (raw:', allResults.length, ')');
+            apiData.authorWebResults = results;
+            console.log('[Enrichment] Author web search results:', results.length, 'items');
           }
         }
       });
@@ -6177,8 +6139,10 @@ function showEnrichmentReviewPanel(result) {
       const safeUrl = r.url.replace(/"/g,'&quot;');
       let domain = '';
       try { domain = new URL(r.url).hostname.replace(/^www\./, ''); } catch(e) {}
-      return `<div style="padding:6px 10px;margin:3px 0;background:#fefce8;border:1px solid #fde68a;border-radius:8px;">
-        <a href="${safeUrl}" target="_blank" style="font-size:13px;color:#3b82f6;font-weight:500;text-decoration:none;">${safeTitle}</a>
+      const engineLabel = r.engine === 'OpenAlex(作者作品)' ? '<span style="font-size:10px;color:#059669;background:#d1fae5;padding:1px 5px;border-radius:4px;margin-right:4px;">作者论文</span>' : '<span style="font-size:10px;color:#7c3aed;background:#ede9fe;padding:1px 5px;border-radius:4px;margin-right:4px;">学术搜索</span>';
+      const bgStyle = r.engine === 'OpenAlex(作者作品)' ? 'background:#f0fdf4;border:1px solid #bbf7d0;' : 'background:#fefce8;border:1px solid #fde68a;';
+      return `<div style="padding:6px 10px;margin:3px 0;${bgStyle}border-radius:8px;">
+        ${engineLabel}<a href="${safeUrl}" target="_blank" style="font-size:13px;color:#3b82f6;font-weight:500;text-decoration:none;">${safeTitle}</a>
         <div style="font-size:12px;color:#6b7280;line-height:1.5;margin-top:2px;">${safeSnippet}</div>
         <div style="font-size:11px;color:#9ca3af;margin-top:2px;">${domain}</div>
       </div>`;
