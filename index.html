@@ -1122,6 +1122,115 @@ body {
   transition: width 0.3s;
 }
 
+/* Batch Image Import */
+.batch-import-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 16px;
+  margin-top: 16px;
+}
+.batch-item {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--bg-card);
+  transition: box-shadow 0.2s;
+}
+.batch-item:hover { box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
+.batch-item-thumb {
+  width: 100%;
+  height: 180px;
+  object-fit: cover;
+  background: #f1f5f9;
+  cursor: pointer;
+}
+.batch-item-fields {
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.batch-item-fields .form-input,
+.batch-item-fields .form-select {
+  font-size: 13px;
+  padding: 6px 8px;
+}
+.batch-item-fields label {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+.batch-item-remove {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  background: rgba(0,0,0,0.6);
+  color: #fff;
+  border: none;
+  border-radius: 50%;
+  width: 26px;
+  height: 26px;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2;
+}
+.batch-item-remove:hover { background: rgba(220,38,38,0.85); }
+.batch-thumb-wrapper {
+  position: relative;
+  width: 100%;
+  height: 180px;
+}
+.batch-empty-hint {
+  text-align: center;
+  padding: 40px 20px;
+  color: var(--text-muted);
+}
+.batch-progress {
+  margin-bottom: 12px;
+  padding: 10px 16px;
+  background: #e8f0fe;
+  border-radius: 8px;
+  font-size: 13px;
+}
+.batch-progress .progress-bar {
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  margin-top: 8px;
+}
+.batch-progress .progress-fill {
+  height: 4px;
+  background: var(--primary);
+  border-radius: 2px;
+  width: 0%;
+  transition: width 0.3s;
+}
+/* Image thumbnail in ref card */
+.ref-card-thumb {
+  width: 100%;
+  height: 160px;
+  object-fit: cover;
+  border-radius: 8px;
+  margin-bottom: 8px;
+  cursor: pointer;
+}
+/* Image in detail modal */
+.detail-image-preview {
+  width: 100%;
+  max-height: 500px;
+  object-fit: contain;
+  border-radius: 12px;
+  margin-bottom: 16px;
+  background: #f1f5f9;
+}
+[data-theme="dark"] .batch-item-thumb,
+[data-theme="dark"] .detail-image-preview { background: #1e293b; }
+
 /* Douban Import */
 .douban-section {
   background: var(--bg-card);
@@ -1308,6 +1417,27 @@ body {
     <div class="modal-footer">
       <button class="btn btn-secondary" onclick="closeModal('importModal')">取消</button>
       <button class="btn btn-primary" onclick="performImport()">导入</button>
+    </div>
+  </div>
+</div>
+
+<!-- Batch Image Import Modal -->
+<div class="modal-overlay" id="batchModal">
+  <div class="modal" style="max-width: 900px;">
+    <div class="modal-header">
+      <h3>批量导入图片</h3>
+      <button class="modal-close" onclick="closeModal('batchModal')">×</button>
+    </div>
+    <div class="modal-body" id="batchBody">
+      <div class="batch-progress" id="batchProgress" style="display:none">
+        <div id="batchProgressText">正在处理图片...</div>
+        <div class="progress-bar"><div class="progress-fill" id="batchProgressFill"></div></div>
+      </div>
+      <div id="batchGrid" class="batch-import-grid"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal('batchModal')">取消</button>
+      <button class="btn btn-primary" onclick="saveBatchReferences()">全部保存</button>
     </div>
   </div>
 </div>
@@ -1711,8 +1841,14 @@ function renderCard(ref) {
     abstractHtml = `<div class="ref-card-abstract">${escapeHtml(ref.abstract)}</div>`;
   }
 
+  let thumbHtml = '';
+  if (ref.thumb) {
+    thumbHtml = `<img class="ref-card-thumb" src="${ref.thumb}" onclick="showDetail('${ref.id}')" loading="lazy">`;
+  }
+
   return `
     <div class="ref-card">
+      ${thumbHtml}
       <div class="ref-card-header">
         <span class="ref-type-badge ${ref.type}">${TYPE_LABELS[ref.type]}</span>
         <div class="ref-card-title" onclick="showDetail('${ref.id}')">${escapeHtml(ref.title)}</div>
@@ -2113,11 +2249,11 @@ function renderForm(ref) {
       ondragleave="handlePdfDragLeave(event)"
       ondrop="handlePdfDrop(event)"
       onclick="document.getElementById('pdfFileInput').click()">
-      <div class="drop-icon">📄⬇️</div>
-      <div class="drop-text">将 PDF 文件拖拽到此处</div>
-      <div class="drop-sub">系统将自动识别标题、作者、期刊等信息并填入表单</div>
-      <div class="drop-hint">或点击此处选择文件</div>
-      <input type="file" id="pdfFileInput" accept=".pdf" style="display:none" onchange="handlePdfSelect(event)">
+      <div class="drop-icon">📄🖼️⬇️</div>
+      <div class="drop-text">将 PDF 或图片拖拽到此处</div>
+      <div class="drop-sub">PDF 自动识别标题、作者等信息；多张图片批量导入为图像文献</div>
+      <div class="drop-hint">或点击此处选择文件（可多选）</div>
+      <input type="file" id="pdfFileInput" accept=".pdf,image/*" multiple style="display:none" onchange="handlePdfSelect(event)">
     </div>
     <div class="pdf-progress" id="pdfProgress">
       <div id="pdfProgressText">正在解析 PDF...</div>
@@ -2313,6 +2449,7 @@ function showDetail(id) {
   });
 
   body.innerHTML = `
+    ${ref.thumb ? `<img class="detail-image-preview" src="${ref.thumb}" onclick="this.style.maxHeight='none'">` : ''}
     <span class="ref-type-badge ${ref.type}" style="margin-bottom:12px;display:inline-block">${TYPE_LABELS[ref.type]}</span>
     <h2>${escapeHtml(ref.title)}</h2>
     <div class="detail-authors">${escapeHtml(ref.authors || '佚名')}</div>
@@ -2906,18 +3043,361 @@ function handlePdfDrop(e) {
   e.preventDefault();
   e.stopPropagation();
   document.getElementById('pdfDropZone').classList.remove('drag-over');
-  const files = e.dataTransfer.files;
-  if (files.length > 0 && files[0].type === 'application/pdf') {
-    processPdf(files[0]);
-  } else {
-    showToast('请拖拽 PDF 文件', 'error');
-  }
+  const files = Array.from(e.dataTransfer.files);
+  handleDroppedFiles(files);
 }
 function handlePdfSelect(e) {
-  const file = e.target.files[0];
-  if (file && file.type === 'application/pdf') {
-    processPdf(file);
+  const files = Array.from(e.target.files);
+  if (files.length === 0) return;
+  handleDroppedFiles(files);
+  // Reset input so selecting the same file again still triggers onchange
+  e.target.value = '';
+}
+
+// Route files to PDF processing or batch image import
+function handleDroppedFiles(files) {
+  const pdfs = files.filter(f => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf'));
+  const images = files.filter(f => f.type.startsWith('image/'));
+
+  if (pdfs.length === 0 && images.length === 0) {
+    showToast('请拖拽 PDF 或图片文件', 'error');
+    return;
   }
+
+  // Single PDF → existing flow
+  if (pdfs.length === 1 && images.length === 0) {
+    processPdf(pdfs[0]);
+    return;
+  }
+
+  // Multiple PDFs → process each sequentially into the form, then batch save
+  if (pdfs.length > 1 && images.length === 0) {
+    processMultiplePdfs(pdfs);
+    return;
+  }
+
+  // Images (with or without PDFs) → batch image import
+  if (images.length > 0) {
+    processImageBatch(images, pdfs);
+    return;
+  }
+}
+
+// ========== Batch Image Import ==========
+let batchImportItems = []; // { thumb, title, source, year, type, file }
+
+async function processImageBatch(imageFiles, pdfFiles) {
+  // Close the edit modal and open batch modal
+  closeModal('editModal');
+  batchImportItems = [];
+
+  const batchGrid = document.getElementById('batchGrid');
+  const batchProgress = document.getElementById('batchProgress');
+  const batchProgressText = document.getElementById('batchProgressText');
+  const batchProgressFill = document.getElementById('batchProgressFill');
+
+  batchGrid.innerHTML = '';
+  batchProgress.style.display = 'block';
+  batchProgressText.textContent = '正在处理图片 0/' + imageFiles.length + '...';
+  batchProgressFill.style.width = '0%';
+
+  document.getElementById('batchModal').classList.add('show');
+
+  for (let i = 0; i < imageFiles.length; i++) {
+    const file = imageFiles[i];
+    batchProgressText.textContent = `正在处理图片 ${i + 1}/${imageFiles.length}：${file.name}`;
+    batchProgressFill.style.width = ((i / imageFiles.length) * 100) + '%';
+
+    try {
+      const thumb = await resizeImageToBase64(file, 800, 0.82);
+      const title = file.name.replace(/\.[^.]+$/, '').replace(/[_\-]+/g, ' ').trim();
+      batchImportItems.push({
+        thumb,
+        title: title || ('图片 ' + (i + 1)),
+        source: '',
+        year: '',
+        type: 'image',
+        fileName: file.name
+      });
+      renderBatchGrid();
+    } catch (err) {
+      console.error('Image processing error:', err);
+      showToast(`无法处理图片：${file.name}`, 'error');
+    }
+  }
+
+  batchProgressText.textContent = `完成：${batchImportItems.length} 张图片已就绪`;
+  batchProgressFill.style.width = '100%';
+  setTimeout(() => { batchProgress.style.display = 'none'; }, 1500);
+
+  // If there are also PDFs, process them too (add as articles)
+  if (pdfFiles && pdfFiles.length > 0) {
+    for (const pdfFile of pdfFiles) {
+      // For batch mode, we'll add a placeholder and process on save
+      batchImportItems.push({
+        thumb: null,
+        title: pdfFile.name.replace(/\.pdf$/i, ''),
+        source: '',
+        year: '',
+        type: 'article',
+        fileName: pdfFile.name,
+        pdfFile: pdfFile
+      });
+    }
+    renderBatchGrid();
+  }
+}
+
+function renderBatchGrid() {
+  const grid = document.getElementById('batchGrid');
+  if (batchImportItems.length === 0) {
+    grid.innerHTML = '<div class="batch-empty-hint">尚无图片。请拖拽图片到添加文献的拖放区。</div>';
+    return;
+  }
+
+  grid.innerHTML = batchImportItems.map((item, idx) => {
+    const thumbHtml = item.thumb
+      ? `<div class="batch-thumb-wrapper"><img class="batch-item-thumb" src="${item.thumb}" onclick="previewBatchImage(${idx})"><button class="batch-item-remove" onclick="removeBatchItem(${idx})" title="移除">×</button></div>`
+      : `<div class="batch-thumb-wrapper" style="display:flex;align-items:center;justify-content:center;background:var(--bg);font-size:40px">📄<button class="batch-item-remove" onclick="removeBatchItem(${idx})" title="移除">×</button></div>`;
+
+    const typeOptions = Object.entries(TYPE_LABELS).map(([k, v]) =>
+      `<option value="${k}" ${item.type === k ? 'selected' : ''}>${TYPE_ICONS[k]} ${v}</option>`
+    ).join('');
+
+    return `
+    <div class="batch-item">
+      ${thumbHtml}
+      <div class="batch-item-fields">
+        <div>
+          <label>标题</label>
+          <input type="text" class="form-input" value="${escapeHtml(item.title)}" oninput="updateBatchItem(${idx}, 'title', this.value)" placeholder="标题">
+        </div>
+        <div>
+          <label>${item.type === 'image' ? '创作者/拍摄者' : '作者'}</label>
+          <input type="text" class="form-input" value="${escapeHtml(item.authors || '')}" oninput="updateBatchItem(${idx}, 'authors', this.value)" placeholder="${item.type === 'image' ? '如：张大千' : '如：张三、李四'}">
+        </div>
+        <div>
+          <label>${item.type === 'image' ? '来源/馆藏' : '期刊/出版者'}</label>
+          <input type="text" class="form-input" value="${escapeHtml(item.source)}" oninput="updateBatchItem(${idx}, 'source', this.value)" placeholder="${item.type === 'image' ? '如：故宫博物院' : '如：历史研究'}">
+        </div>
+        <div style="display:flex;gap:8px">
+          <div style="flex:1">
+            <label>年份</label>
+            <input type="text" class="form-input" value="${escapeHtml(item.year)}" oninput="updateBatchItem(${idx}, 'year', this.value)" placeholder="2024">
+          </div>
+          <div style="flex:1">
+            <label>类型</label>
+            <select class="form-select" onchange="updateBatchItem(${idx}, 'type', this.value)">${typeOptions}</select>
+          </div>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function updateBatchItem(idx, field, value) {
+  if (batchImportItems[idx]) {
+    batchImportItems[idx][field] = value;
+  }
+}
+
+function removeBatchItem(idx) {
+  batchImportItems.splice(idx, 1);
+  renderBatchGrid();
+}
+
+function previewBatchImage(idx) {
+  const item = batchImportItems[idx];
+  if (item && item.thumb) {
+    // Open in a simple full-screen overlay
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);z-index:10000;display:flex;align-items:center;justify-content:center;cursor:zoom-out';
+    overlay.innerHTML = `<img src="${item.thumb}" style="max-width:90%;max-height:90%;border-radius:8px">`;
+    overlay.onclick = () => overlay.remove();
+    document.body.appendChild(overlay);
+  }
+}
+
+async function saveBatchReferences() {
+  if (batchImportItems.length === 0) {
+    showToast('没有可保存的条目', 'error');
+    return;
+  }
+
+  let saved = 0;
+  let failed = 0;
+
+  for (const item of batchImportItems) {
+    try {
+      const ref = {
+        id: uuid(),
+        type: item.type || 'image',
+        title: item.title || '未命名',
+        source: item.source || '',
+        year: item.year || '',
+        authors: item.authors || '',
+        tags: [],
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+
+      // Store thumbnail for image type
+      if (item.thumb) {
+        ref.thumb = item.thumb;
+      }
+
+      // Copy any extra metadata from PDF extraction
+      if (item.metadata) {
+        if (item.metadata.journal) ref.journal = item.metadata.journal;
+        if (item.metadata.volume) ref.volume = item.metadata.volume;
+        if (item.metadata.issue) ref.issue = item.metadata.issue;
+        if (item.metadata.pages) ref.pages = item.metadata.pages;
+        if (item.metadata.doi) ref.doi = item.metadata.doi;
+        if (item.metadata.abstract) ref.abstract = item.metadata.abstract;
+        if (item.metadata.keywords) ref.keywords = item.metadata.keywords;
+      }
+
+      await dbAdd(ref);
+      allRefs.push(ref);
+      saved++;
+    } catch (err) {
+      console.error('Save error for item:', item, err);
+      failed++;
+    }
+  }
+
+  closeModal('batchModal');
+  refreshUI();
+  showToast(`已保存 ${saved} 条文献` + (failed > 0 ? `，${failed} 条失败` : ''), failed > 0 ? 'error' : 'success');
+  batchImportItems = [];
+}
+
+// Resize image to max width, return base64 JPEG
+function resizeImageToBase64(file, maxW, quality) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        let w = img.naturalWidth;
+        let h = img.naturalHeight;
+        if (w > maxW) {
+          h = Math.round(h * (maxW / w));
+          w = maxW;
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        // White background for PNG with transparency
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, w, h);
+        ctx.drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL('image/jpeg', quality || 0.82));
+      };
+      img.onerror = () => reject(new Error('Image load failed'));
+      img.src = e.target.result;
+    };
+    reader.onerror = () => reject(new Error('File read failed'));
+    reader.readAsDataURL(file);
+  });
+}
+
+// Process multiple PDFs sequentially
+async function processMultiplePdfs(pdfs) {
+  closeModal('editModal');
+  batchImportItems = [];
+
+  const batchGrid = document.getElementById('batchGrid');
+  const batchProgress = document.getElementById('batchProgress');
+  const batchProgressText = document.getElementById('batchProgressText');
+  const batchProgressFill = document.getElementById('batchProgressFill');
+
+  batchGrid.innerHTML = '';
+  batchProgress.style.display = 'block';
+  document.getElementById('batchModal').classList.add('show');
+
+  for (let i = 0; i < pdfs.length; i++) {
+    const file = pdfs[i];
+    batchProgressText.textContent = `正在解析 PDF ${i + 1}/${pdfs.length}：${file.name}`;
+    batchProgressFill.style.width = ((i / pdfs.length) * 100) + '%';
+
+    try {
+      const metadata = await extractPdfMetadata(file);
+      batchImportItems.push({
+        thumb: null,
+        title: metadata.title || file.name.replace(/\.pdf$/i, ''),
+        source: metadata.journal || metadata.publisher || '',
+        year: metadata.year || '',
+        authors: metadata.authors || '',
+        type: 'article',
+        fileName: file.name,
+        metadata: metadata
+      });
+      renderBatchGrid();
+    } catch (err) {
+      console.error('PDF processing error:', err);
+      batchImportItems.push({
+        thumb: null,
+        title: file.name.replace(/\.pdf$/i, ''),
+        source: '',
+        year: '',
+        type: 'article',
+        fileName: file.name
+      });
+      renderBatchGrid();
+    }
+  }
+
+  batchProgressText.textContent = `完成：${batchImportItems.length} 个 PDF 已就绪`;
+  batchProgressFill.style.width = '100%';
+  setTimeout(() => { batchProgress.style.display = 'none'; }, 1500);
+}
+
+// Lightweight PDF metadata extraction for batch mode
+async function extractPdfMetadata(file) {
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+
+  let fullText = '';
+  const pagesToRead = Math.min(pdf.numPages, 3);
+  for (let i = 1; i <= pagesToRead; i++) {
+    const pg = await pdf.getPage(i);
+    const tc = await pg.getTextContent();
+    let pageText = '';
+    for (const item of tc.items) {
+      pageText += item.str;
+      if (item.hasEOL) pageText += '\n';
+    }
+    fullText += pageText + '\n\n';
+  }
+
+  // Try PDF metadata first
+  let result = {};
+  try {
+    const meta = await pdf.getMetadata();
+    const info = meta?.info || {};
+    if (info.Title) result.title = info.Title;
+    if (info.Author) result.authors = info.Author;
+  } catch(e) {}
+
+  // Basic extraction
+  if (!result.title) {
+    const titleMatch = fullText.match(/^[\s]*([^\n]{5,100})/);
+    if (titleMatch) result.title = titleMatch[1].trim();
+  }
+  if (!result.year) {
+    const yearMatch = fullText.match(/(?:19|20)\d{2}/);
+    if (yearMatch) result.year = yearMatch[0];
+  }
+  if (!result.authors) {
+    const authorMatch = fullText.match(/(?:作者|Author|By)[：:]\s*([^\n]{2,80})/i);
+    if (authorMatch) result.authors = authorMatch[1].trim();
+  }
+
+  return result;
 }
 
 async function processPdf(file) {
