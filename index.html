@@ -808,18 +808,19 @@ function renderIO() {
 
       <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
         <div style="font-size:13px;color:var(--text-muted);margin-bottom:8px">
-          如果 URL 方式获取失败（豆瓣可能限制访问），可以手动操作：
+          URL 方式会自动获取所有分页数据。如果获取失败（豆瓣可能限制访问），可以手动操作：
         </div>
         <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;line-height:1.6">
           1. 在浏览器中打开你的豆瓣豆列页面<br>
           2. 右键 → 查看页面源代码（或按 Ctrl+U）<br>
           3. 全选复制源代码，粘贴到下方文本框<br>
-          4. 点击「解析 HTML」<br>
+          4. 如果豆列有多页，请分别复制每页的 HTML 源代码，用 <code style="background:var(--bg-hover);padding:1px 4px;border-radius:3px">&lt;!--PAGE--&gt;</code> 分隔粘贴<br>
+          5. 点击「解析 HTML」<br>
           <span style="color:#6366f1">解析后可点击「补全缺失信息」按钮，通过豆瓣API自动获取作者、出版社、年份等</span>
         </div>
         <div class="cloud-form-group">
-          <label>粘贴豆瓣页面 HTML 源代码</label>
-          <textarea class="form-textarea" id="doubanPasteArea" rows="5" placeholder="在此粘贴豆瓣豆列页面的完整 HTML 源代码..."></textarea>
+          <label>粘贴豆瓣页面 HTML 源代码（多页可用 &lt;!--PAGE--&gt; 分隔）</label>
+          <textarea class="form-textarea" id="doubanPasteArea" rows="5" placeholder="在此粘贴豆瓣豆列页面的完整 HTML 源代码...&#10;多页时用 <!--PAGE--> 分隔每页的 HTML"></textarea>
         </div>
         <button class="btn btn-secondary" onclick="handleDoubanPaste()">解析 HTML</button>
       </div>
@@ -5874,6 +5875,8 @@ async function autoEnrichAndReview(metadata) {
 }
 
 // ========== Douban Import ==========
+const DOUBAN_PAGE_SIZE = 25;
+
 async function fetchDoubanList(url) {
   // Douban blocks CORS; try multiple proxies, Cloudflare Worker first (most reliable)
   const proxyUrls = [
@@ -5892,6 +5895,128 @@ async function fetchDoubanList(url) {
     } catch(e) { continue; }
   }
   throw new Error('无法访问豆瓣页面，请尝试粘贴 HTML 方式导入');
+}
+
+// —— Build a paginated URL by injecting/changing the start= parameter ——
+function buildDoubanPageUrl(baseUrl, startVal) {
+  try {
+    const u = new URL(baseUrl);
+    u.searchParams.set('start', String(startVal));
+    return u.toString();
+  } catch(e) {
+    // Fallback: manual append
+    const sep = baseUrl.includes('?') ? '&' : '?';
+    return `${baseUrl}${sep}start=${startVal}`;
+  }
+}
+
+// —— Detect total pages from the first page's HTML ——
+function detectDoubanTotalPages(html) {
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+
+  // Strategy 1: paginator links — find max start value
+  const paginator = doc.querySelector('.paginator');
+  if (paginator) {
+    const links = paginator.querySelectorAll('a[href*="start="]');
+    let maxStart = 0;
+    links.forEach(a => {
+      const m = (a.getAttribute('href') || '').match(/start=(\d+)/);
+      if (m) maxStart = Math.max(maxStart, parseInt(m[1]));
+    });
+    // Also check current page number from .thispage
+    const thisPage = paginator.querySelector('.thispage');
+    if (thisPage) {
+      const totalText = thisPage.getAttribute('data-total-page') || '';
+      const totalMatch = totalText.match(/(\d+)/);
+      if (totalMatch) return parseInt(totalMatch[1]);
+    }
+    if (maxStart > 0) return Math.floor(maxStart / DOUBAN_PAGE_SIZE) + 1;
+  }
+
+  // Strategy 2: text like "共123条" or "123 items"
+  const totalMatch = html.match(/共\s*(\d+)\s*(?:条|本|部)/);
+  if (totalMatch) {
+    const total = parseInt(totalMatch[1]);
+    if (total > 0) return Math.ceil(total / DOUBAN_PAGE_SIZE);
+  }
+
+  // Strategy 3: check for "next" link
+  const nextLink = doc.querySelector('.next a, a.next, a[rel="next"], .paginator .next a');
+  if (nextLink) return -1; // unknown total — fetch until no next
+
+  return 1; // single page
+}
+
+// —— Check if HTML has a "next page" link ——
+function hasNextPage(html) {
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const next = doc.querySelector('.next a, a.next, a[rel="next"], .paginator .next a');
+  if (!next) return false;
+  // Ensure it's not just a disabled span
+  const href = next.getAttribute('href') || '';
+  if (!href || href === '#') return false;
+  return true;
+}
+
+// —— Fetch ALL pages of a Douban list, parse and merge — dedup by doubanId/title ——
+async function fetchDoubanListAllPages(url, onProgress) {
+  const allBooks = [];
+  const seenKeys = new Set();
+  let page = 1;
+  let maxPages = 1;
+  let unknownTotal = false;
+
+  // Safety limit: max 50 pages (≈1250 items)
+  const MAX_PAGES = 50;
+
+  while (page <= MAX_PAGES) {
+    if (onProgress) onProgress(page, allBooks.length);
+
+    const pageUrl = page === 1 ? url : buildDoubanPageUrl(url, (page - 1) * DOUBAN_PAGE_SIZE);
+    let html;
+    try {
+      html = await fetchDoubanList(pageUrl);
+    } catch(e) {
+      if (page === 1) throw e; // first page failure is fatal
+      break; // subsequent page failure — stop gracefully
+    }
+
+    const books = parseDoubanHtml(html);
+    if (books.length === 0) break;
+
+    // Deduplicate and accumulate
+    for (const book of books) {
+      const key = book.doubanId || book.title;
+      if (!seenKeys.has(key)) {
+        seenKeys.add(key);
+        allBooks.push(book);
+      }
+    }
+
+    // First page: detect total pages
+    if (page === 1) {
+      maxPages = detectDoubanTotalPages(html);
+      if (maxPages === -1) {
+        unknownTotal = true;
+        maxPages = MAX_PAGES;
+      }
+    }
+
+    // Check if we should stop:
+    // 1. Known total and reached it
+    if (!unknownTotal && page >= maxPages) break;
+    // 2. No "next" link on this page
+    if (!hasNextPage(html)) break;
+    // 3. Fewer items than page size (last page)
+    if (books.length < DOUBAN_PAGE_SIZE) break;
+
+    page++;
+
+    // Small delay to avoid rate limiting
+    await new Promise(r => setTimeout(r, 600));
+  }
+
+  return allBooks;
 }
 
 // —— Douban suggest API: fetch complete metadata by title ——
@@ -6188,9 +6313,18 @@ async function importDoubanUrl() {
   btn.textContent = '获取中...';
   btn.disabled = true;
 
+  // Progress display area
+  const preview = document.getElementById('doubanPreview');
+  if (preview) {
+    preview.innerHTML = '<div style="text-align:center;padding:24px;color:var(--text-muted)"><div style="font-size:15px;margin-bottom:8px">正在获取豆列数据...</div><div id="doubanFetchProgress" style="font-size:13px">正在获取第 1 页...</div></div>';
+  }
+
   try {
-    const html = await fetchDoubanList(url);
-    const books = parseDoubanHtml(html);
+    const books = await fetchDoubanListAllPages(url, (pageNum, count) => {
+      btn.textContent = `获取中 (${count})`;
+      const prog = document.getElementById('doubanFetchProgress');
+      if (prog) prog.textContent = `正在获取第 ${pageNum} 页，已找到 ${count} 本...`;
+    });
 
     if (books.length === 0) {
       showToast('未能从该页面解析到书目信息，请尝试粘贴 HTML 方式', 'error');
@@ -6200,9 +6334,10 @@ async function importDoubanUrl() {
     }
 
     renderDoubanPreview(books);
-    showToast(`找到 ${books.length} 本书籍`, 'success');
+    showToast(`共找到 ${books.length} 本书籍`, 'success');
   } catch(e) {
     showToast('获取失败: ' + e.message, 'error');
+    if (preview) preview.innerHTML = '';
   }
 
   btn.textContent = '获取豆列';
@@ -6211,17 +6346,32 @@ async function importDoubanUrl() {
 
 function handleDoubanPaste() {
   const textarea = document.getElementById('doubanPasteArea');
-  const html = textarea?.value.trim();
-  if (!html) { showToast('请粘贴豆瓣页面 HTML', 'error'); return; }
+  const raw = textarea?.value.trim();
+  if (!raw) { showToast('请粘贴豆瓣页面 HTML', 'error'); return; }
 
-  const books = parseDoubanHtml(html);
-  if (books.length === 0) {
+  // Support multiple pages: split by <!--PAGE--> marker or just parse concatenated HTML
+  const pages = raw.split(/<!--\s*PAGE\s*-->/i).map(p => p.trim()).filter(p => p);
+  const allBooks = [];
+  const seenKeys = new Set();
+
+  for (let i = 0; i < pages.length; i++) {
+    const books = parseDoubanHtml(pages[i]);
+    for (const book of books) {
+      const key = book.doubanId || book.title;
+      if (!seenKeys.has(key)) {
+        seenKeys.add(key);
+        allBooks.push(book);
+      }
+    }
+  }
+
+  if (allBooks.length === 0) {
     showToast('未能解析到书目信息', 'error');
     return;
   }
 
-  renderDoubanPreview(books);
-  showToast(`找到 ${books.length} 本书籍`, 'success');
+  renderDoubanPreview(allBooks);
+  showToast(pages.length > 1 ? `从 ${pages.length} 页中解析到 ${allBooks.length} 本书籍（已去重）` : `找到 ${allBooks.length} 本书籍`, 'success');
 }
 
 function renderDoubanPreview(books) {
