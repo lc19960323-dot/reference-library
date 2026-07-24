@@ -4716,33 +4716,66 @@ function titleSimilarity(a, b) {
 
 // === Bing RSS Search ===
 // Bing's RSS format returns clean XML (no JS rendering, no CAPTCHA) — works reliably through Cloudflare Worker
-async function searchBingRSS(query, limit = 10) {
-  const rssUrl = `https://www.bing.com/search?format=rss&q=${encodeURIComponent(query)}`;
-  console.log('[Enrichment] Bing RSS search:', query.substring(0, 60));
+// Search OpenAlex Works API (replaces broken Bing RSS)
+// OpenAlex is CORS-friendly, no proxy needed, returns structured metadata
+async function searchOpenAlexWorks(query, limit = 10) {
+  const url = `https://api.openalex.org/works?search=${encodeURIComponent(query)}&per_page=${limit}&mailto=research@example.com`;
+  console.log('[Enrichment] OpenAlex Works search:', query.substring(0, 60));
   try {
-    const res = await fetchViaProxy(rssUrl, 15000);
-    const xmlText = await res.text();
-    if (!xmlText || xmlText.length < 100) return [];
-    // Parse XML
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(xmlText, 'text/xml');
-    const items = doc.querySelectorAll('item');
+    const res = await fetchWithTimeout(url, {}, 15000);
+    if (!res.ok) return [];
+    const data = await res.json();
     const results = [];
-    for (let i = 0; i < Math.min(items.length, limit); i++) {
-      const item = items[i];
-      const title = item.querySelector('title')?.textContent?.trim() || '';
-      const link = item.querySelector('link')?.textContent?.trim() || '';
-      const desc = item.querySelector('description')?.textContent?.trim() || '';
-      if (title && link) {
-        results.push({ title, url: link, snippet: desc.substring(0, 300) });
+    for (const work of (data.results || [])) {
+      const title = work.title || '';
+      let workUrl = work.doi || '';
+      if (!workUrl && work.primary_location && work.primary_location.landing_page) {
+        workUrl = work.primary_location.landing_page.url || '';
+      }
+      if (!workUrl) workUrl = work.id || '';
+      const year = work.publication_year || '';
+      const venue = (work.primary_location && work.primary_location.source) ? (work.primary_location.source.display_name || '') : '';
+      const cited = work.cited_by_count || 0;
+      const authors = (work.authorships || []).slice(0, 3).map(a => (a.author && a.author.display_name) || '').join(', ');
+      const biblio = work.biblio || {};
+      const vol = biblio.volume || '';
+      const issue = biblio.issue || '';
+      const pages = [biblio.first_page, biblio.last_page].filter(Boolean).join('-');
+      const snippetParts = [];
+      if (authors) snippetParts.push(authors);
+      if (year) snippetParts.push(String(year));
+      if (venue) snippetParts.push(venue);
+      if (vol) snippetParts.push(`卷${vol}`);
+      if (issue) snippetParts.push(`期${issue}`);
+      if (pages) snippetParts.push(`页${pages}`);
+      if (cited) snippetParts.push(`被引${cited}次`);
+      if (title) {
+        results.push({
+          title, url: workUrl,
+          snippet: snippetParts.join(' · '),
+          engine: 'OpenAlex',
+          _meta: { authors, year: year ? String(year) : '', journal: venue, volume: vol, issue, pages, doi: work.doi || '' }
+        });
       }
     }
-    console.log('[Enrichment] Bing RSS returned', results.length, 'results');
+    console.log('[Enrichment] OpenAlex returned', results.length, 'results');
     return results;
   } catch (e) {
-    console.log('[Enrichment] Bing RSS failed:', e.message);
+    console.log('[Enrichment] OpenAlex search failed:', e.message);
     return [];
   }
+}
+
+// Generate direct search links to academic databases for a paper
+function generatePaperSearchLinks(title, author) {
+  const encTitle = encodeURIComponent(title);
+  const encQuery = encodeURIComponent((author ? author + ' ' : '') + title);
+  return [
+    { title: `Google Scholar 搜索此论文`, url: `https://scholar.google.com/scholar?q=${encQuery}`, snippet: '在 Google Scholar 上搜索此论文', engine: '学术搜索' },
+    { title: `华艺线上图书馆搜索`, url: `https://www.airitilibrary.com/Search?q=${encQuery}`, snippet: '在台湾学术期刊数据库搜索', engine: '学术搜索' },
+    { title: `法源法律网搜索`, url: `https://www.lawdata.com.tw/search.aspx?TY=article&q=${encTitle}`, snippet: '在台湾法学文献数据库搜索', engine: '学术搜索' },
+    { title: `全国图书书目资讯网`, url: `https://nbincl3.ncl.edu.tw/search/q=${encQuery}`, snippet: '在国家图书馆搜索', engine: '学术搜索' },
+  ];
 }
 
 // === Extract citation_* meta tags from a web page ===
@@ -5296,79 +5329,58 @@ async function autoEnrichReference(metadata) {
     });
   }
 
-  // Query 9: Bing RSS web search + citation metadata extraction
-  // Uses Bing's RSS XML format (no JS rendering, no CAPTCHA) through Cloudflare Worker
-  // Also tries to fetch promising result pages to extract citation_* meta tags
+  // Query 9: OpenAlex Works search + academic search links
+  // Bing RSS is completely broken (returns random results). OpenAlex is CORS-friendly.
   if (metadata.title) {
     let webQuery = metadata.title;
     if (metadata.authors) webQuery += ' ' + metadata.authors.split(/[,，]/)[0].trim();
     queries.push({
-      name: 'Bing RSS搜索',
-      url: 'skip',  // Special marker — this query uses searchBingRSS() instead of direct fetch
+      name: 'OpenAlex论文搜索',
+      url: 'skip',
       handler: async () => {
-        const results = await searchBingRSS(webQuery, 10);
-        if (results.length === 0) return;
-        apiData.apiSources.push('Bing RSS搜索');
-        apiData.webSearchResults = results.map(r => ({ ...r, engine: 'Bing RSS' }));
-        foundSomething = true;
-
-        // 1. Parse citation patterns from ALL search result descriptions
+        const results = await searchOpenAlexWorks(webQuery, 10);
+        const firstAuthor = metadata.authors ? metadata.authors.split(/[,，]/)[0].trim() : '';
+        const searchLinks = generatePaperSearchLinks(metadata.title, firstAuthor);
+        const allResults = [...results, ...searchLinks];
+        if (allResults.length > 0) {
+          apiData.apiSources.push('OpenAlex论文搜索');
+          apiData.webSearchResults = allResults;
+          foundSomething = true;
+        }
+        // Extract structured metadata from OpenAlex results
         for (const r of results) {
-          const cited = parseCitationFromText(r.snippet);
-          if (cited.author && !enriched.authors && !metadata.authors) { enriched.authors = cited.author; foundSomething = true; }
-          if (cited.journal && !enriched.journal && !metadata.journal) { enriched.journal = cited.journal; foundSomething = true; }
-          if (cited.year && !enriched.year && !metadata.year) { enriched.year = cited.year; foundSomething = true; }
-          if (cited.volume && !enriched.volume && !metadata.volume) { enriched.volume = cited.volume; foundSomething = true; }
-          if (cited.pages && !enriched.pages && !metadata.pages) { enriched.pages = cited.pages; foundSomething = true; }
-          if (cited.title && !enriched.title && !metadata.title) { enriched.title = cited.title; foundSomething = true; }
-          // Also try DOI
-          if (!enriched.doi && !metadata.doi) {
-            const doiMatch = r.snippet.match(/10\.\d{4,}\/[^\s,;]+/);
-            if (doiMatch) { enriched.doi = doiMatch[0]; foundSomething = true; }
+          if (r._meta) {
+            const m = r._meta;
+            if (m.authors && !enriched.authors && !metadata.authors) { enriched.authors = m.authors; foundSomething = true; }
+            if (m.year && !enriched.year && !metadata.year) { enriched.year = m.year; foundSomething = true; }
+            if (m.journal && !enriched.journal && !metadata.journal) { enriched.journal = m.journal; foundSomething = true; }
+            if (m.volume && !enriched.volume && !metadata.volume) { enriched.volume = m.volume; foundSomething = true; }
+            if (m.issue && !enriched.issue && !metadata.issue) { enriched.issue = m.issue; foundSomething = true; }
+            if (m.pages && !enriched.pages && !metadata.pages) { enriched.pages = m.pages; foundSomething = true; }
+            if (m.doi && !enriched.doi && !metadata.doi) { enriched.doi = m.doi; foundSomething = true; }
           }
         }
-
-        // 2. Try to fetch promising academic pages and extract citation_* meta tags
-        // Sort URLs to prioritize domains known to work with the Worker proxy
-        // (ihp.sinica.edu.tw is behind Cloudflare and will fail, so put it last)
+        // Try to fetch academic pages for citation_* meta tags (lawdata, airiti, etc.)
         const domainPriority = {
-          'lawdata.com.tw': 1,      // Works with Worker, has citation_* meta
-          'airitilibrary.com': 2,    // Works with Worker, has citation_* meta
+          'lawdata.com.tw': 1, 'airitilibrary.com': 2,
           'tandfonline.com': 3, 'jstor.org': 3, 'cambridge.org': 3,
           'springer.com': 3, 'wiley.com': 3, 'sciencedirect.com': 3,
           'muse.jhu.edu': 3, 'cnki.com.cn': 3, 'wanfangdata.com.cn': 3,
-          'ir.sinica.edu.tw': 4, 'scholars.sinica': 4, 'mingqing.sinica': 4,
-          'newhistory.org.tw': 4,
-          'ihp.sinica': 9,           // Behind Cloudflare, likely to fail
+          'ir.sinica.edu.tw': 4,
         };
         const academicUrls = results
           .map(r => r.url)
-          .filter(url => {
-            const promising = Object.keys(domainPriority);
-            return promising.some(d => url.includes(d));
-          })
-          .sort((a, b) => {
-            const pa = Math.min(...Object.keys(domainPriority).filter(d => a.includes(d)).map(d => domainPriority[d]));
-            const pb = Math.min(...Object.keys(domainPriority).filter(d => b.includes(d)).map(d => domainPriority[d]));
-            return pa - pb;
-          })
-          // Remove duplicates by base URL
+          .filter(url => Object.keys(domainPriority).some(d => url.includes(d)))
+          .filter(url => !url.endsWith('.pdf'))
           .filter((url, idx, arr) => arr.findIndex(u => u.split('?')[0] === url.split('?')[0]) === idx)
-          .slice(0, 4);  // Try up to 4 URLs
-
+          .slice(0, 3);
         for (const pageUrl of academicUrls) {
           try {
             const meta = await tryExtractFromUrl(pageUrl, 10000);
             if (meta) {
               apiData.apiSources.push('网页元数据提取');
               if (meta.citation_title && !enriched.title && !metadata.title) { enriched.title = meta.citation_title; foundSomething = true; }
-              else if (meta.citation_title && metadata.title && meta.citation_title !== metadata.title) {
-                corrections.title = meta.citation_title;
-              }
-              if (meta.citation_author) {
-                if (!enriched.authors && !metadata.authors) { enriched.authors = meta.citation_author; foundSomething = true; }
-                else if (metadata.authors && meta.citation_author !== metadata.authors) { corrections.authors = meta.citation_author; }
-              }
+              if (meta.citation_author && !enriched.authors && !metadata.authors) { enriched.authors = meta.citation_author; foundSomething = true; }
               if (meta.citation_journal_title && !enriched.journal && !metadata.journal) { enriched.journal = meta.citation_journal_title; foundSomething = true; }
               if (meta.citation_publication_date) {
                 const yr = meta.citation_publication_date.match(/(\d{4})/)?.[1];
@@ -5381,16 +5393,9 @@ async function autoEnrichReference(metadata) {
                 if (!enriched.pages && !metadata.pages) { enriched.pages = pages; foundSomething = true; }
               }
               if (meta.citation_doi && !enriched.doi && !metadata.doi) { enriched.doi = meta.citation_doi; foundSomething = true; }
-              if (meta.citation_keywords && !enriched.keywords && !metadata.keywords) {
-                enriched.keywords = meta.citation_keywords; foundSomething = true;
-              }
-              if (meta.citation_abstract && !enriched.abstract && !metadata.abstract) {
-                enriched.abstract = meta.citation_abstract; foundSomething = true;
-              }
-              if (meta.citation_publisher && !enriched.tags && !metadata.tags) {
-                enriched.tags = [meta.citation_publisher]; foundSomething = true;
-              }
-              break;  // Stop after first successful extraction
+              if (meta.citation_keywords && !enriched.keywords && !metadata.keywords) { enriched.keywords = meta.citation_keywords; foundSomething = true; }
+              if (meta.citation_abstract && !enriched.abstract && !metadata.abstract) { enriched.abstract = meta.citation_abstract; foundSomething = true; }
+              break;
             }
           } catch (e) { /* try next URL */ }
         }
@@ -5553,37 +5558,39 @@ async function autoEnrichReference(metadata) {
 
   // === Simplified/Traditional dual search queries ===
   // For Chinese titles, add parallel queries using the traditional variant
-  // This covers resources published in traditional Chinese (Hong Kong, Taiwan, etc.)
   if (tradMetadata && tradMetadata.title !== metadata.title) {
-    // Traditional Chinese Bing RSS search
+    // Traditional Chinese OpenAlex search (replaces broken Bing RSS)
     let tradWebQuery = tradMetadata.title;
     if (tradMetadata.authors) tradWebQuery += ' ' + tradMetadata.authors.split(/[,，;；]/)[0].trim();
     queries.push({
-      name: 'Bing RSS(繁體)',
+      name: 'OpenAlex(繁體)',
       url: 'skip',
       handler: async () => {
-        const tradResults = await searchBingRSS(tradWebQuery, 10);
+        const tradResults = await searchOpenAlexWorks(tradWebQuery, 10);
         if (tradResults.length > 0) {
-          apiData.apiSources.push('Bing RSS(繁體)');
+          apiData.apiSources.push('OpenAlex(繁體)');
           const existing = apiData.webSearchResults || [];
           const seen = new Set(existing.map(r => r.url.split('?')[0]));
           const newResults = tradResults.filter(r => !seen.has(r.url.split('?')[0]));
           apiData.webSearchResults = [...existing, ...newResults].slice(0, 15);
           foundSomething = true;
-
-          // Also try citation extraction from traditional Chinese results
-          for (const r of tradResults.slice(0, 3)) {
-            const cited = parseCitationFromText(r.snippet);
-            if (cited.journal && !enriched.journal && !metadata.journal) { enriched.journal = cited.journal; foundSomething = true; }
-            if (cited.year && !enriched.year && !metadata.year) { enriched.year = cited.year; foundSomething = true; }
-            if (cited.volume && !enriched.volume && !metadata.volume) { enriched.volume = cited.volume; foundSomething = true; }
-            if (cited.pages && !enriched.pages && !metadata.pages) { enriched.pages = cited.pages; foundSomething = true; }
+          // Extract metadata from OpenAlex structured data
+          for (const r of tradResults) {
+            if (r._meta) {
+              const m = r._meta;
+              if (m.journal && !enriched.journal && !metadata.journal) { enriched.journal = m.journal; foundSomething = true; }
+              if (m.year && !enriched.year && !metadata.year) { enriched.year = m.year; foundSomething = true; }
+              if (m.volume && !enriched.volume && !metadata.volume) { enriched.volume = m.volume; foundSomething = true; }
+              if (m.issue && !enriched.issue && !metadata.issue) { enriched.issue = m.issue; foundSomething = true; }
+              if (m.pages && !enriched.pages && !metadata.pages) { enriched.pages = m.pages; foundSomething = true; }
+              if (m.doi && !enriched.doi && !metadata.doi) { enriched.doi = m.doi; foundSomething = true; }
+            }
           }
-
           // Try to extract citation meta from academic pages
           const academicUrls = tradResults
             .map(r => r.url)
             .filter(url => ['lawdata.com.tw', 'airitilibrary.com', 'sinica.edu.tw', 'tandfonline.com', 'jstor.org'].some(d => url.includes(d)))
+            .filter(url => !url.endsWith('.pdf'))
             .slice(0, 2);
           for (const pageUrl of academicUrls) {
             try {
@@ -5600,9 +5607,6 @@ async function autoEnrichReference(metadata) {
                 if (meta.citation_publication_date) {
                   const yr = meta.citation_publication_date.match(/(\d{4})/)?.[1];
                   if (yr && !enriched.year && !metadata.year) { enriched.year = yr; foundSomething = true; }
-                }
-                if (meta.citation_keywords && !enriched.keywords && !metadata.keywords) {
-                  enriched.keywords = meta.citation_keywords; foundSomething = true;
                 }
                 break;
               }
@@ -5783,69 +5787,30 @@ async function autoEnrichReference(metadata) {
     });
   }
 
-  // Query: IHp Sinica (史语所) — search via Bing RSS for ihp.sinica.edu.tw links
-  // Note: ihp.sinica.edu.tw is behind Cloudflare, so the Worker can't fetch its pages directly.
-  // Instead, we search for it via Bing RSS and extract metadata from the search result descriptions.
+  // Query: IHp Sinica (史语所) — direct search links
+  // Bing RSS is broken, ihp.sinica.edu.tw is behind Cloudflare.
+  // Generate direct search links for the user to click in their browser.
   if (metadata.title && hasChineseTitle) {
-    const ihpQuery = (metadata.authors ? metadata.authors.split(/[,，;；]/)[0].trim() + ' ' : '') + metadata.title;
     queries.push({
       name: 'IHp Sinica (史语所)',
       url: 'skip',
       handler: async () => {
-        // Search Bing RSS for the paper + ihp.sinica
-        const results = await searchBingRSS(ihpQuery + ' site:ihp.sinica.edu.tw', 5);
-        // Also search without site restriction but include sinica in query
-        const results2 = results.length === 0 ? await searchBingRSS(ihpQuery + ' sinica', 5) : results;
-
-        // Try to find and fetch IHp Sinica article pages
-        const ihpLinks = results2.filter(r => r.url.includes('ihp.sinica.edu.tw') || r.url.includes('sinica.edu.tw'));
-        if (ihpLinks.length > 0) {
-          apiData.apiSources.push('IHp Sinica (史语所)');
-          // Add to web search results
-          const existing = apiData.webSearchResults || [];
-          const seen = new Set(existing.map(r => r.url.split('?')[0]));
-          for (const r of ihpLinks) {
-            if (!seen.has(r.url.split('?')[0])) {
-              existing.push({ ...r, engine: 'IHp Sinica' });
-              seen.add(r.url.split('?')[0]);
-            }
-          }
-          apiData.webSearchResults = existing.slice(0, 15);
-
-          // Try to fetch the article page via Worker (may fail for CF-protected sites)
-          for (const link of ihpLinks.slice(0, 2)) {
-            try {
-              const articleRes = await fetchViaProxy(link.url, 10000);
-              const articleHtml = await articleRes.text();
-              if (articleHtml.length > 500 && !isCloudflareErrorPage(articleHtml)) {
-                const parsed = parseIhpSinicaArticle(articleHtml);
-                if (parsed.title_cn || parsed.author_cn) {
-                  if (!enriched.title && !metadata.title && parsed.title_cn) { enriched.title = parsed.title_cn; foundSomething = true; }
-                  if (!enriched.authors && !metadata.authors && parsed.author_cn) { enriched.authors = parsed.author_cn; foundSomething = true; }
-                  if (!enriched.abstract && !metadata.abstract && parsed.abstract) { enriched.abstract = parsed.abstract; foundSomething = true; }
-                  if (!enriched.journal && !metadata.journal && parsed.journal) { enriched.journal = parsed.journal; foundSomething = true; }
-                  if (!enriched.year && !metadata.year && parsed.pub_date) { enriched.year = parsed.pub_date.split('/')[0]; foundSomething = true; }
-                  if (!enriched.volume && !metadata.volume && parsed.volume) { enriched.volume = parsed.volume; foundSomething = true; }
-                  if (!enriched.pages && !metadata.pages && parsed.pages) { enriched.pages = parsed.pages; foundSomething = true; }
-                  foundSomething = true;
-                  break;
-                }
-              }
-            } catch (e) {
-              console.log('[Enrichment] IHp article fetch failed (CF-blocked?):', e.message);
-            }
+        const firstAuthor = metadata.authors ? metadata.authors.split(/[,，;；]/)[0].trim() : '';
+        const encQuery = encodeURIComponent((firstAuthor ? firstAuthor + ' ' : '') + metadata.title);
+        const links = [
+          { title: `Google 搜索中研院史语所「${metadata.title}」`, url: `https://www.google.com/search?q=${encQuery}+site:ihp.sinica.edu.tw`, snippet: '通过 Google 搜索中研院史语所网站上的相关页面', engine: 'IHp Sinica' },
+          { title: `Google Scholar 搜索「${metadata.title}」`, url: `https://scholar.google.com/scholar?q=${encQuery}`, snippet: '在 Google Scholar 上搜索此论文', engine: 'IHp Sinica' },
+        ];
+        apiData.apiSources.push('IHp Sinica (史语所)');
+        const existing = apiData.webSearchResults || [];
+        const seen = new Set(existing.map(r => r.url.split('?')[0]));
+        for (const r of links) {
+          if (!seen.has(r.url.split('?')[0])) {
+            existing.push(r);
+            seen.add(r.url.split('?')[0]);
           }
         }
-
-        // Also parse citation info from search result descriptions
-        for (const r of results2.slice(0, 3)) {
-          const cited = parseCitationFromText(r.snippet);
-          if (cited.author && !enriched.authors && !metadata.authors) { enriched.authors = cited.author; foundSomething = true; }
-          if (cited.journal && !enriched.journal && !metadata.journal) { enriched.journal = cited.journal; foundSomething = true; }
-          if (cited.year && !enriched.year && !metadata.year) { enriched.year = cited.year; foundSomething = true; }
-          if (cited.volume && !enriched.volume && !metadata.volume) { enriched.volume = cited.volume; foundSomething = true; }
-          if (cited.pages && !enriched.pages && !metadata.pages) { enriched.pages = cited.pages; foundSomething = true; }
-        }
+        apiData.webSearchResults = existing.slice(0, 15);
       }
     });
   }
