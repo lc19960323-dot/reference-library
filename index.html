@@ -3226,10 +3226,10 @@ async function smartPrefillPdf(pageLines, fullText, pdf) {
         const numStr = m[2];
         const num = /^\d+$/.test(numStr) ? parseInt(numStr) : chineseToNumber(numStr);
         if (num > 0) {
-          // If pattern contains 期 (but not 卷), it's Taiwan issue-as-volume convention
+          // If pattern contains 期 (but not 卷), only set issue — leave volume empty
+          // so that autoEnrichAndReview can fill it via secondary API search (Crossref/OpenAlex)
           if (/期/.test(m[0]) && !/卷/.test(m[0])) {
             if (!result.issue) result.issue = String(num);
-            if (!result.volume) result.volume = String(num);
           } else {
             if (!result.volume) result.volume = String(num);
           }
@@ -3266,8 +3266,7 @@ async function smartPrefillPdf(pageLines, fullText, pdf) {
           const iss = /^\d+$/.test(issueMatches[0][1]) ? parseInt(issueMatches[0][1]) : chineseToNumber(issueMatches[0][1]);
           if (iss > 0) {
             result.issue = String(iss);
-            // Taiwan journals often use 期 as volume too (e.g., 法制史研究第三十三期 = vol.33)
-            if (!result.volume) result.volume = String(iss);
+            // Do NOT assume volume = issue. Leave volume empty for secondary search.
             console.log('[PDF] P2 issue from 第X期 (' + src.label + '):', issueMatches[0][0]);
           }
         }
