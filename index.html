@@ -5485,11 +5485,11 @@ async function autoEnrichReference(metadata) {
         name: '作者学术主页搜索',
         url: 'skip',
         handler: async () => {
-          // Use targeted queries with academic context terms that actually appear
-          // on Chinese academic profile pages
+          // Strategy: search author name + academic role terms
+          // These are the terms that appear on actual Chinese academic profile pages
           const searchQueries = [
-            `${firstAuthor} 教授`,
-            `${firstAuthor} 研究員`,
+            `"${firstAuthor}" 教授`,
+            `"${firstAuthor}" 研究員`,
           ];
 
           // Collect results from both queries
@@ -5498,66 +5498,91 @@ async function autoEnrichReference(metadata) {
             const results = await searchBingRSS(sq, 5);
             allResults.push(...results);
           }
+          console.log('[Enrichment] Author search raw results:', allResults.length);
 
-          // Academic domain list for priority filtering
+          // Academic domain list — results from these domains are highly relevant
           const academicDomains = [
-            'edu.tw', 'edu.cn', 'edu.hk', 'edu.sg', 'edu.au',
+            'edu.tw', 'edu.cn', 'edu.hk', 'edu.sg', 'edu.au', 'edu.jp',
             'sinica.edu.tw', 'ntu.edu.tw', 'nccu.edu.tw', 'nthu.edu.tw',
             'ncku.edu.tw', 'ntnu.edu.tw', 'fcu.edu.tw', 'nchu.edu.tw',
             'scholar.google', 'researchgate.net', 'academia.edu',
             'lawdata.com.tw', 'airitilibrary.com', 'hyread.com.tw',
             'th.gov.tw', 'ihp.sinica.edu.tw', 'ccs.nccu.edu.tw',
-            'portal.gov.tw', 'most.gov.tw',
+            'portal.gov.tw', 'most.gov.tw', 'ncl.edu.tw',
+            'pku.edu.cn', 'tsinghua.edu.cn', 'fudan.edu.cn',
           ];
 
-          // Spam/aggregator domains to exclude
-          const spamDomains = [
+          // Domains that are NOT academic homepages — exclude
+          const excludeDomains = [
             'youtube.com', 'facebook.com', 'twitter.com', 'instagram.com',
             'tiktok.com', 'pinterest.com', 'reddit.com',
             'shopee', 'taobao', 'amazon', 'ebay',
+            'wikimedia.org', 'wikipedia.org',
+            'news.', 'blog.', 'blogger.',
           ];
+
+          // Also generate simplified Chinese variant of author name for matching
+          // (Bing may return results in either traditional or simplified)
+          const tradToSimp = { '陳':'陈','遠':'远','華':'华','東':'东','學':'学','經':'经','論':'论',
+            '萬':'万','圖':'图','開':'开','應':'应','節':'节','說':'说','製':'制','記':'记',
+            '傳':'传','書':'书','畫':'画','藝':'艺','術':'术','動':'动','態':'态','當':'当',
+            '關':'关','係':'系','發':'发','達':'达','變':'变','體':'体','會':'会','員':'员',
+            '員':'员','區':'区','農':'农','運':'运','歷':'历','憲':'宪','觀':'观','點':'点',
+            '黨':'党','國':'国','場':'场','員':'员','檔':'档','案':'案','壓':'压','壞':'坏',
+            '繫':'系','獄':'狱','諸':'诸','考':'考','清':'清','代':'代','中':'中','央':'央',
+            '熙':'熙','漢':'汉','語':'语','歷':'历','史':'史','研':'研','究':'究','所':'所' };
+          let firstAuthorSimp = '';
+          for (const ch of firstAuthor) {
+            firstAuthorSimp += tradToSimp[ch] || ch;
+          }
 
           // Deduplicate and filter
           const seen = new Set();
-          const filtered = allResults.filter(r => {
+          const scored = allResults.map(r => {
             const urlKey = r.url.split('?')[0].toLowerCase();
-            if (seen.has(urlKey)) return false;
+            if (seen.has(urlKey)) return null;
             seen.add(urlKey);
 
-            // Exclude spam/aggregator domains
-            if (spamDomains.some(d => r.url.includes(d))) return false;
+            // Exclude non-academic domains
+            if (excludeDomains.some(d => r.url.includes(d))) return null;
 
-            // Must mention the author name somewhere (title or snippet)
-            const mentionsAuthor = r.title.includes(firstAuthor) || r.snippet.includes(firstAuthor);
-            if (!mentionsAuthor) return false;
+            // Check if author name appears (try both traditional and simplified)
+            const authorInTitle = r.title.includes(firstAuthor) || r.title.includes(firstAuthorSimp);
+            const authorInSnippet = r.snippet.includes(firstAuthor) || r.snippet.includes(firstAuthorSimp);
+            if (!authorInTitle && !authorInSnippet) return null;
 
-            // Check if from academic domain
-            const isAcademic = academicDomains.some(d => r.url.includes(d));
+            // Score the result
+            let score = 0;
+            const isAcademicDomain = academicDomains.some(d => r.url.includes(d));
+            if (isAcademicDomain) score += 10;
+            if (authorInTitle) score += 5;
+            if (authorInSnippet) score += 2;
 
-            // Include if academic domain, OR if title contains academic keywords
-            const academicKeywords = ['教授', '研究員', '研究員', '博士生', '副教授', '助理教授',
-              'faculty', 'profile', '簡歷', '履歷', '著作目錄', 'publication', 'scholar',
-              '專任', '兼任', 'lecturer', 'professor'];
-            const hasAcademicKeyword = academicKeywords.some(k =>
-              r.title.includes(k) || r.snippet.includes(k));
+            // Profile-related keywords in title (strong signal)
+            const profileKeywords = ['教授', '研究員', '研究员', '副教授', '助理教授',
+              '博士生', '導師', '导师', 'faculty', 'professor', 'profile', '簡歷', '履历',
+              '著作目錄', 'publications', 'scholar', '專任', '兼任', 'lecturer'];
+            if (profileKeywords.some(k => r.title.includes(k))) score += 5;
+            if (profileKeywords.some(k => r.snippet.includes(k))) score += 2;
 
-            return isAcademic || hasAcademicKeyword;
-          });
+            // University/institute keywords in snippet
+            const instituteKeywords = ['大學', '大学', '研究所', '研究院', '學院', '学院',
+              'university', 'institute', 'college', 'department'];
+            if (instituteKeywords.some(k => r.snippet.includes(k))) score += 3;
 
-          // Sort: academic domains first, then others
-          const sorted = filtered.sort((a, b) => {
-            const aAcademic = academicDomains.some(d => a.url.includes(d)) ? 0 : 1;
-            const bAcademic = academicDomains.some(d => b.url.includes(d)) ? 0 : 1;
-            return aAcademic - bAcademic;
-          });
+            return { result: r, score };
+          }).filter(x => x !== null && x.score > 0);
 
-          const finalResults = sorted.slice(0, 5);
+          // Sort by score descending
+          scored.sort((a, b) => b.score - a.score);
+
+          const finalResults = scored.slice(0, 5).map(x => x.result);
           if (finalResults.length > 0) {
             apiData.apiSources.push('作者学术主页搜索');
             apiData.authorWebResults = finalResults.map(r => ({ ...r, engine: 'Bing RSS(作者)' }));
-            console.log('[Enrichment] Author web search results:', finalResults.length, 'items (filtered from', allResults.length, ')');
+            console.log('[Enrichment] Author web search results:', finalResults.length, 'items (from', allResults.length, 'raw, scores:', scored.map(x=>x.score).join(','), ')');
           } else {
-            console.log('[Enrichment] Author web search: no relevant results after filtering');
+            console.log('[Enrichment] Author web search: no relevant results after scoring (raw:', allResults.length, ')');
           }
         }
       });
@@ -6920,7 +6945,7 @@ init();
 // ========== PWA Support ==========
 // Register Service Worker
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('/sw.js').then(reg => {
+  navigator.serviceWorker.register('sw.js?v=2').then(reg => {
     console.log('SW registered:', reg.scope);
   }).catch(err => {
     console.log('SW registration failed:', err);

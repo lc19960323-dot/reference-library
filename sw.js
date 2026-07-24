@@ -1,13 +1,13 @@
-const CACHE_NAME = 'reflib-v1';
+const CACHE_NAME = 'reflib-v2';
 const ASSETS = [
-  '/index.html',
-  '/manifest.json',
-  '/icon.svg'
+  '/reference-library/index.html',
+  '/reference-library/manifest.json',
+  '/reference-library/icon.svg'
 ];
 
 self.addEventListener('install', event => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then(cache => cache.addAll(ASSETS))
+    caches.open(CACHE_NAME).then(cache => cache.addAll(ASSETS).catch(() => {}))
   );
   self.skipWaiting();
 });
@@ -22,19 +22,32 @@ self.addEventListener('activate', event => {
 });
 
 self.addEventListener('fetch', event => {
-  event.respondWith(
-    caches.match(event.request).then(cached => {
-      return cached || fetch(event.request).then(response => {
-        if (response.ok && event.request.method === 'GET') {
+  const request = event.request;
+
+  // Network-first for HTML documents (always get latest version)
+  if (request.mode === 'navigate' || (request.method === 'GET' && request.headers.get('accept')?.includes('text/html'))) {
+    event.respondWith(
+      fetch(request).then(response => {
+        if (response.ok) {
           const clone = response.clone();
-          caches.open(CACHE_NAME).then(cache => cache.put(event.request, clone));
+          caches.open(CACHE_NAME).then(cache => cache.put(request, clone));
         }
         return response;
-      }).catch(() => {
-        if (event.request.destination === 'document') {
-          return caches.match('/index.html');
+      }).catch(() => caches.match(request).then(cached => cached || caches.match('/reference-library/index.html')))
+    );
+    return;
+  }
+
+  // Cache-first for other assets
+  event.respondWith(
+    caches.match(request).then(cached => {
+      return cached || fetch(request).then(response => {
+        if (response.ok && request.method === 'GET') {
+          const clone = response.clone();
+          caches.open(CACHE_NAME).then(cache => cache.put(request, clone));
         }
-      });
+        return response;
+      }).catch(() => cached);
     })
   );
 });
