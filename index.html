@@ -6906,14 +6906,24 @@ async function init() {
 
 init();
 
-// ========== PWA Support ==========
-// Register Service Worker
+// ========== PWA Support (DISABLED - was causing stale cache) ==========
+// Unregister any existing Service Worker and clear all caches
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('sw.js?v=2').then(reg => {
-    console.log('SW registered:', reg.scope);
-  }).catch(err => {
-    console.log('SW registration failed:', err);
+  navigator.serviceWorker.getRegistrations().then(registrations => {
+    registrations.forEach(reg => {
+      console.log('[PWA] Unregistering Service Worker:', reg.scope);
+      reg.unregister();
+    });
   });
+  // Clear all caches
+  if ('caches' in window) {
+    caches.keys().then(keys => {
+      keys.forEach(key => {
+        console.log('[PWA] Deleting cache:', key);
+        caches.delete(key);
+      });
+    });
+  }
 }
 
 // PWA Install Prompt
