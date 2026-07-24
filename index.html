@@ -2963,19 +2963,37 @@ async function processPdf(file) {
     for (const pl of pageLines) pl.text = cleanPdfText(pl.text);
 
     // Full text from first 3 pages + last page for regex-based extraction
+    // IMPORTANT: preserve line breaks using hasEOL — abstract/keywords regexes
+    // depend on \n before section markers (摘要\n关键词) to work correctly
     let fullText = '';
     const pagesToRead = Math.min(pdf.numPages, 3);
     for (let i = 1; i <= pagesToRead; i++) {
       const pg = await pdf.getPage(i);
       const tc = await pg.getTextContent();
-      fullText += cleanPdfText(tc.items.map(it => it.str).join(' ')) + '\n\n';
+      let pageText = '';
+      for (const it of tc.items) {
+        if (it.str) {
+          pageText += it.str;
+          if (it.hasEOL) pageText += '\n';
+          else pageText += ' ';
+        }
+      }
+      fullText += cleanPdfText(pageText) + '\n\n';
     }
     // Also read last page for ending page number and publication info
     if (pdf.numPages > pagesToRead) {
       try {
         const lastPg = await pdf.getPage(pdf.numPages);
         const lastTc = await lastPg.getTextContent();
-        fullText += cleanPdfText(lastTc.items.map(it => it.str).join(' ')) + '\n\n';
+        let lastPageText = '';
+        for (const it of lastTc.items) {
+          if (it.str) {
+            lastPageText += it.str;
+            if (it.hasEOL) lastPageText += '\n';
+            else lastPageText += ' ';
+          }
+        }
+        fullText += cleanPdfText(lastPageText) + '\n\n';
       } catch(e) {}
     }
 
@@ -3180,21 +3198,33 @@ async function smartPrefillPdf(pageLines, fullText, pdf) {
   }
   if (yearCandidates.length > 0) result.year = yearCandidates[yearCandidates.length - 1];
 
-  // Abstract (improved: handle 摘 要, 摘  要 with spaces, and colon variants)
+  // Abstract (improved: handle 摘 要, 摘  要 with spaces, colon variants, and Traditional Chinese 關鍵詞)
+  // Also handle cases where hasEOL wasn't set and text is space-separated
+  // KW = 关键词(simplified) | 關鍵詞(traditional) — reuse in all patterns
+  const KW = '关键词|关\\s*键\\s*词|關鍵詞|關\\s*鍵\\s*詞';
+  const CLC = '中图分类号|文獻標識碼|文献标识码|文章编号|CLC';
   const abstractPatterns = [
-    /(?:摘\s*要|内容摘要|论文摘要)\s*[：:]\s*([\s\S]{30,3000}?)(?=\n\s*(?:关键词|关\s*键\s*词|Key\s*words?|Keywords?|中图分类号|文献标识码|1\.?\s*(?:Introduction|引言)|引言|CLC))/i,
+    new RegExp(`(?:摘\\s*要|内容摘要|论文摘要|內容摘要|論文摘要)\\s*[：:]\\s*([\\s\\S]{30,3000}?)(?=\\n\\s*(?:${KW}|Key\\s*words?|Keywords?|${CLC}|1\\.?\\s*(?:Introduction|引言|INTRODUCTION)|引言))`, 'i'),
+    new RegExp(`(?:摘\\s*要|内容摘要|论文摘要|內容摘要|論文摘要)\\s*[：:]\\s*([\\s\\S]{30,3000}?)(?=\\s+(?:${KW}|Key\\s*words?|Keywords?|${CLC}))`, 'i'),
     /(?:Abstract|ABSTRACT)\s*[：:]?\s*\n?([\s\S]{30,3000}?)(?=\n\s*(?:Keywords?|Key\s*words?|1\.?\s*Introduction|1\s+Introduction|Introduction))/i,
-    /(?:摘\s*要|内容摘要|论文摘要)\s*\n([\s\S]{30,3000}?)(?=\n\s*(?:关键词|关\s*键\s*词|Key\s*words?|Keywords?|中图分类号))/i,
+    /(?:Abstract|ABSTRACT)\s*[：:]?\s*([\s\S]{30,3000}?)(?=\s+(?:Keywords?|Key\s*words?|1\.?\s*Introduction))/i,
+    new RegExp(`(?:摘\\s*要|内容摘要|论文摘要|內容摘要|論文摘要)\\s*\\n([\\s\\S]{30,3000}?)(?=\\n\\s*(?:${KW}|Key\\s*words?|Keywords?|${CLC}))`, 'i'),
+    new RegExp(`(?:摘\\s*要|内容摘要|论文摘要|內容摘要|論文摘要)\\s*[：:]?\\s*([\\s\\S]{30,3000}?)(?=\\n\\s*(?:DOI|doi|收稿日期|收稿日期|基金项目|基金項目|文章编号|文章編號))`, 'i'),
   ];
   for (const pat of abstractPatterns) {
     const m = fullText.match(pat);
     if (m) { result.abstract = m[1].trim(); break; }
   }
 
-  // Keywords (improved)
+  // Keywords (improved, supports Traditional Chinese 關鍵詞)
   const kwPatterns = [
-    /(?:关键词|关\s*键\s*词)\s*[：:]\s*([\s\S]{5,500}?)(?=\n\s*(?:中图分类号|文献标识码|文章编号|1\.?\s*(?:Introduction|引言)|引言|DOI|©|CLC))/i,
+    new RegExp(`(?:${KW})\\s*[：:]\\s*([\\s\\S]{5,500}?)(?=\\n\\s*(?:${CLC}|1\\.?\\s*(?:Introduction|引言|INTRODUCTION)|引言|DOI|doi|©|CLC))`, 'i'),
+    new RegExp(`(?:${KW})\\s*[：:]\\s*([\\s\\S]{5,500}?)(?=\\s+(?:${CLC}|1\\.?\\s*(?:Introduction|引言|INTRODUCTION)|引言|DOI|doi|©|CLC))`, 'i'),
     /(?:Keywords?|Key\s*words?|Key Words)\s*[：:]\s*([\s\S]{5,500}?)(?=\n\s*(?:1\.?\s*Introduction|1\s+Introduction|Introduction|DOI|©))/i,
+    /(?:Keywords?|Key\s*words?|Key Words)\s*[：:]\s*([\s\S]{5,500}?)(?=\s+(?:1\.?\s*Introduction|Introduction|DOI|©))/i,
+    // Taiwan format: keywords on a single line, followed by newline or DOI/收稿日期 etc.
+    new RegExp(`(?:${KW})\\s*[：:]\\s*([^\\n]{5,300})(?:\\n|$)`, 'i'),
+    /(?:Keywords?|Key\s*words?)\s*[：:]\s*([^\n]{5,300})(?:\n|$)/i,
   ];
   for (const pat of kwPatterns) {
     const m = fullText.match(pat);
