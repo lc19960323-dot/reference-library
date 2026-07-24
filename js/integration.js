@@ -35,15 +35,8 @@ import {
 } from './backup.js';
 
 import {
-  extractPdfLayout,
-  extractLayoutMetadata,
-  fetchCrossrefByDoi,
   normalizeDoi
 } from './pdf-parser.js';
-
-import {
-  showPdfExtractionPreview
-} from './pdf-preview.js';
 
 /* ---------- PWA: 使用相对路径注册 Service Worker ---------- */
 
@@ -296,95 +289,10 @@ window.toggleAutoDest = function toggleAutoDest(destId, enabled) {
   showToast(enabled ? '自动备份已启用' : '自动备份已禁用', 'success');
 };
 
-/* ---------- PDF 导入接入 ---------- */
-
-window.parsePdfSecurely = async function parsePdfSecurely(file) {
-  const progress = document.getElementById('pdfProgress');
-  const progressText = document.getElementById('pdfProgressText');
-  const progressFill = document.getElementById('pdfProgressFill');
-
-  if (progress) {
-    progress.classList.add('show');
-    progressText.textContent = '正在读取 PDF...';
-    progressFill.style.width = '10%';
-  }
-
-  try {
-    const arrayBuffer = await file.arrayBuffer();
-    if (progress) progressFill.style.width = '20%';
-
-    const pdfjsLib = await loadPdfJs();
-    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-
-    if (progress) {
-      progressText.textContent = '正在提取文本布局...';
-      progressFill.style.width = '40%';
-    }
-
-    const layout = await extractPdfLayout(pdf, 3);
-    const pdfMeta = await pdf.getMetadata();
-
-    if (progress) {
-      progressText.textContent = '正在智能识别...';
-      progressFill.style.width = '60%';
-    }
-
-    const embedded = {
-      title: pdfMeta?.info?.Title || '',
-      authors: pdfMeta?.info?.Author || '',
-      year:
-        pdfMeta?.info?.CreationDate?.match(/D:(\d{4})/)?.[1] || ''
-    };
-
-    let metadata = extractLayoutMetadata(layout, embedded);
-    let dataSource = 'PDF 版面分析';
-
-    if (progress) progressFill.style.width = '75%';
-
-    if (metadata.doi) {
-      try {
-        const crossref = await fetchCrossrefByDoi(metadata.doi);
-        if (crossref) {
-          metadata = crossref;
-          dataSource = 'Crossref（DOI）';
-        }
-      } catch (error) {
-        console.warn('Crossref 查询失败，保留 PDF 分析结果', error);
-        dataSource = 'PDF 版面分析（Crossref 查询失败）';
-      }
-    }
-
-    if (progress) {
-      progressFill.style.width = '100%';
-      progressFill.style.background = '#22c55e';
-      progressText.textContent = '✅ PDF 文本已提取并预填';
-    }
-
-    showToast('请在面板中确认/修正预填信息', 'success');
-
-    showPdfExtractionPreview({
-      metadata,
-      dataSource,
-      onApply: result => {
-        fillFormFromMetadata(result);
-        showToast('信息已填入表单，请检查后保存', 'success');
-
-        // Auto-enrich: search APIs for supplementary data
-        if (typeof autoEnrichAndReview === 'function') {
-          setTimeout(() => autoEnrichAndReview(result), 300);
-        }
-      }
-    });
-
-  } catch (error) {
-    console.error('PDF parse error:', error);
-    if (progress) {
-      progressText.textContent = '❌ PDF 解析失败: ' + error.message;
-      progressFill.style.background = '#ef4444';
-    }
-    showToast('PDF 解析失败，请手动填写信息', 'error');
-  }
-};
+/* ---------- PDF 导入：保留原有 processPdf/smartPrefillPdf/showPdfPickerPanel ---------- */
+/* 原有的 PDF 处理逻辑（smartPrefillPdf 台湾学术格式支持、showPdfPickerPanel
+ * 文本点选式面板）仍在 index.html 内联脚本中，不需要模块覆盖。
+ * pdf-parser.js 的 normalizeDoi 已暴露到 window.normalizeDoi 供调用。 */
 
 /* ---------- 适配旧代码：暴露 getDestinations / getAutoDestIds 等 ---------- */
 

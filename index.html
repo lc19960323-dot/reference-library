@@ -2920,14 +2920,87 @@ function handlePdfSelect(e) {
   }
 }
 
-// PDF 处理已迁移至 js/pdf-parser.js + js/pdf-preview.js 模块。
-// 此函数作为桥接，调用 window.parsePdfSecurely（由 integration.js 暴露）。
 async function processPdf(file) {
-  if (typeof window.parsePdfSecurely === 'function') {
-    return window.parsePdfSecurely(file);
+  const progress = document.getElementById('pdfProgress');
+  const progressText = document.getElementById('pdfProgressText');
+  const progressFill = document.getElementById('pdfProgressFill');
+  if (!progress) return;
+
+  progress.classList.add('show');
+  progressText.textContent = '正在读取 PDF...';
+  progressFill.style.width = '10%';
+
+  try {
+    const arrayBuffer = await file.arrayBuffer();
+    progressText.textContent = '正在解析 PDF 内容...';
+    progressFill.style.width = '20%';
+
+    const pdfjsLib = await loadPdfJs();
+    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+
+    // Extract text lines from first page (with position info)
+    progressText.textContent = '正在提取文本...';
+    progressFill.style.width = '40%';
+
+    const page1 = await pdf.getPage(1);
+    const tc1 = await page1.getTextContent();
+
+    // Build structured lines: group text items by Y-coordinate
+    const items = tc1.items.filter(it => it.str && it.str.trim()).sort((a, b) => b.transform[5] - a.transform[5] || a.transform[4] - b.transform[4]);
+    const pageLines = [];
+    let cur = null;
+    for (const it of items) {
+      const y = Math.round(it.transform[5]);
+      if (!cur || Math.abs(y - cur.y) > 2) {
+        if (cur) pageLines.push(cur);
+        cur = { y, text: cleanPdfText(it.str.trim()), fontSize: Math.abs(it.transform[3] || 12) };
+      } else {
+        cur.text += cleanPdfText(' ' + it.str.trim());
+      }
+    }
+    if (cur) pageLines.push(cur);
+    // Also clean the assembled line text
+    for (const pl of pageLines) pl.text = cleanPdfText(pl.text);
+
+    // Full text from first 3 pages + last page for regex-based extraction
+    let fullText = '';
+    const pagesToRead = Math.min(pdf.numPages, 3);
+    for (let i = 1; i <= pagesToRead; i++) {
+      const pg = await pdf.getPage(i);
+      const tc = await pg.getTextContent();
+      fullText += cleanPdfText(tc.items.map(it => it.str).join(' ')) + '\n\n';
+    }
+    // Also read last page for ending page number and publication info
+    if (pdf.numPages > pagesToRead) {
+      try {
+        const lastPg = await pdf.getPage(pdf.numPages);
+        const lastTc = await lastPg.getTextContent();
+        fullText += cleanPdfText(lastTc.items.map(it => it.str).join(' ')) + '\n\n';
+      } catch(e) {}
+    }
+
+    progressText.textContent = '正在智能识别...';
+    progressFill.style.width = '60%';
+
+    // Smart pre-fill: combine structural + regex + PDF metadata
+    const prefill = await smartPrefillPdf(pageLines, fullText, pdf);
+
+    progressFill.style.width = '90%';
+
+    showPdfPickerPanel(pageLines, prefill);
+
+    progressFill.style.width = '100%';
+    progressFill.style.background = '#22c55e';
+    progressText.textContent = '✅ PDF 文本已提取并预填';
+
+    showToast('请在面板中确认/修正预填信息，或用DOI/标题搜索', 'success');
+
+  } catch(e) {
+    console.error('PDF parse error:', e);
+    progressText.textContent = '❌ PDF 解析失败: ' + e.message;
+    progressFill.style.background = '#ef4444';
+    showToast('PDF 解析失败，请手动填写信息', 'error');
   }
-  // 回退：如果模块尚未加载，提示用户
-  showToast('PDF 解析模块加载中，请稍后重试', 'error');
 }
 
 // ========== Smart Pre-fill Algorithm (v2: Academic Format Aware) ==========
