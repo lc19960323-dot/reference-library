@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>我的参考文献库</title>
-<link rel="manifest" href="manifest.json">
+<link rel="manifest" href="./manifest.json">
 <meta name="theme-color" content="#2563eb">
 <link rel="apple-touch-icon" href="icon.svg">
 <style>
@@ -901,9 +901,6 @@ body {
 
 /* ========== Responsive ========== */
 @media (max-width: 768px) {
-  .sidebar { transform: translateX(-100%); }
-  .sidebar.open { transform: translateX(0); }
-  .main { margin-left: 0; }
   .ref-grid { grid-template-columns: 1fr; }
   .form-row, .form-row-3 { grid-template-columns: 1fr; }
   .io-area { grid-template-columns: 1fr; }
@@ -948,6 +945,90 @@ body {
   font-size: 24px;
   cursor: pointer;
   color: var(--text);
+}
+
+/* 手机端显示菜单按钮，并保证侧栏可关闭。 */
+@media (max-width: 768px) {
+  .menu-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .sidebar {
+    transform: translateX(-100%);
+    z-index: 1500;
+  }
+
+  .sidebar.open {
+    transform: translateX(0);
+  }
+
+  .main {
+    margin-left: 0;
+  }
+}
+
+/* 安全的 PDF 预览面板 */
+.pdf-preview-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.pdf-preview-panel {
+  width: min(680px, 100%);
+  max-height: 90vh;
+  overflow: auto;
+  padding: 24px;
+  border-radius: 12px;
+  background: var(--bg-card, #fff);
+  color: var(--text, #111827);
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.28);
+}
+
+.pdf-preview-source {
+  color: var(--text-muted, #6b7280);
+}
+
+.pdf-preview-fields {
+  display: grid;
+  gap: 12px;
+}
+
+.pdf-preview-field {
+  display: grid;
+  gap: 6px;
+}
+
+.pdf-preview-field span {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.pdf-preview-field input,
+.pdf-preview-field textarea {
+  width: 100%;
+  padding: 9px 11px;
+  border: 1px solid var(--border, #d1d5db);
+  border-radius: 8px;
+  font: inherit;
+  color: inherit;
+  background: var(--bg, #fff);
+}
+
+.pdf-preview-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
 
 /* PDF Drop Zone */
 .pdf-drop-zone {
@@ -1083,11 +1164,6 @@ body {
 .douban-book-info h4 { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
 .douban-book-info p { font-size: 12px; color: var(--text-muted); line-height: 1.4; }
 .douban-book-actions { flex-shrink: 0; }
-}
-
-@media (max-width: 768px) {
-  .menu-toggle { display: block; }
-}
 </style>
 </head>
 <body>
@@ -1155,7 +1231,7 @@ body {
   <!-- Main Content -->
   <div class="main">
     <header class="topbar">
-      <button class="menu-toggle" onclick="toggleSidebar()">☰</button>
+      <button class="menu-toggle" aria-label="菜单">☰</button>
       <div class="search-box">
         <span class="search-icon">🔍</span>
         <input type="text" id="searchInput" placeholder="搜索标题、作者、关键词…" oninput="handleSearch()">
@@ -1821,192 +1897,16 @@ function renderIO() {
 }
 
 // ========== Cloud Backup (Multi-Destination) ==========
-const DESTS_KEY = 'reflib_dests';
-const AUTO_DESTS_KEY = 'reflib_auto_dests';
-const GH_HISTORY_KEY = 'reflib_gh_history';
+// 注意：备份逻辑已迁移至 js/backup.js 模块。
+// Token 不再写入 localStorage，仅保存在当前页面内存中（tokenVault）。
+// 以下仅保留 UI 渲染和平台显示信息。
 
-// Platform definitions
+// Platform definitions (仅用于 UI 显示)
 const PLATFORMS = {
-  github: { name: 'GitHub', icon: '🐙', apiBase: 'https://api.github.com', tokenPrefix: 'ghp_/github_pat_', color: '#24292e' },
-  gitee: { name: 'Gitee (国内)', icon: '🔴', apiBase: 'https://gitee.com/api/v5', tokenPrefix: '', color: '#c71d23' },
-  gitlab: { name: 'GitLab', icon: '🦊', apiBase: 'https://gitlab.com/api/v4', tokenPrefix: 'glpat-', color: '#fc6d26' }
+  github: { name: 'GitHub', icon: '🐙', color: '#24292e' },
+  gitee: { name: 'Gitee (国内)', icon: '🔴', color: '#c71d23' },
+  gitlab: { name: 'GitLab', icon: '🦊', color: '#fc6d26' }
 };
-
-function getDestinations() {
-  try { return JSON.parse(localStorage.getItem(DESTS_KEY) || '[]'); } catch(e) { return []; }
-}
-function saveDestinations(dests) {
-  localStorage.setItem(DESTS_KEY, JSON.stringify(dests));
-}
-function getAutoDestIds() {
-  try { return JSON.parse(localStorage.getItem(AUTO_DESTS_KEY) || '[]'); } catch(e) { return []; }
-}
-function saveAutoDestIds(ids) {
-  localStorage.setItem(AUTO_DESTS_KEY, JSON.stringify(ids));
-}
-function getBackupHistory() {
-  try { return JSON.parse(localStorage.getItem(GH_HISTORY_KEY) || '[]'); } catch(e) { return []; }
-}
-function addBackupHistory(destName, action, status, time) {
-  const hist = getBackupHistory();
-  hist.unshift({ destName, action, status, time });
-  if (hist.length > 30) hist.length = 30;
-  localStorage.setItem(GH_HISTORY_KEY, JSON.stringify(hist));
-}
-
-// Generic Git API caller
-async function gitApi(dest, endpoint, method, body) {
-  const plat = PLATFORMS[dest.platform];
-  let url, headers, opts;
-
-  if (dest.platform === 'gitlab') {
-    const encodedProject = encodeURIComponent(dest.repo);
-    url = `${plat.apiBase}/projects/${encodedProject}/repository/files/${encodeURIComponent(endpoint)}`;
-    headers = { 'PRIVATE-TOKEN': dest.token, 'Content-Type': 'application/json' };
-    opts = { method, headers };
-    if (body) opts.body = JSON.stringify(body);
-  } else if (dest.platform === 'gitee') {
-    url = `${plat.apiBase}/repos/${dest.repo}/${endpoint}`;
-    headers = { 'Authorization': `token ${dest.token}`, 'Content-Type': 'application/json' };
-    opts = { method, headers };
-    if (body) opts.body = JSON.stringify(body);
-  } else {
-    // GitHub
-    url = `${plat.apiBase}/repos/${dest.repo}/${endpoint}`;
-    headers = { 'Authorization': `token ${dest.token}`, 'Accept': 'application/vnd.github.v3+json', 'Content-Type': 'application/json' };
-    opts = { method, headers };
-    if (body) opts.body = JSON.stringify(body);
-  }
-
-  const res = await fetch(url, opts);
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ message: res.statusText }));
-    throw new Error(err.message || `HTTP ${res.status}`);
-  }
-  return res.json();
-}
-
-async function gitGetFileSha(dest, filePath) {
-  try {
-    const data = await gitApi(dest, filePath, 'GET');
-    if (dest.platform === 'gitlab') return data.commit_id || data.last_commit_id;
-    return data.sha;
-  } catch(e) { return null; }
-}
-
-async function gitReadFile(dest, filePath) {
-  try {
-    const data = await gitApi(dest, filePath, 'GET');
-    if (dest.platform === 'gitlab') {
-      return { content: data.content, sha: data.commit_id };
-    }
-    return { content: data.content, sha: data.sha };
-  } catch(e) { return null; }
-}
-
-async function cloudBackupTo(destId) {
-  const dests = getDestinations();
-  const dest = dests.find(d => d.id === destId);
-  if (!dest) { showToast('备份目的地不存在', 'error'); return; }
-  try {
-    const data = JSON.stringify(allRefs);
-    const content = btoa(unescape(encodeURIComponent(data)));
-    const filePath = `data/backup-${dest.id}.json`;
-    const sha = await gitGetFileSha(dest, filePath);
-
-    let body;
-    if (dest.platform === 'gitlab') {
-      body = { content, commit_message: `Auto backup: ${new Date().toLocaleString('zh-CN')} (${allRefs.length} refs)` };
-      if (sha) body.last_commit_id = sha;
-    } else {
-      body = { message: `Auto backup: ${new Date().toLocaleString('zh-CN')} (${allRefs.length} refs)`, content };
-      if (sha) body.sha = sha;
-    }
-
-    await gitApi(dest, filePath, 'PUT', body);
-    addBackupHistory(dest.name, '备份', '成功', new Date().toISOString());
-    showToast(`${dest.name} 备份成功 (${allRefs.length} 条文献)`, 'success');
-    dest.lastBackup = new Date().toISOString();
-    saveDestinations(dests);
-    if (currentView === 'cloud') renderCloud();
-  } catch(e) {
-    addBackupHistory(dest.name || '未知', '备份', '失败: ' + e.message, new Date().toISOString());
-    showToast(`${dest.name || '目的地'} 备份失败: ${e.message}`, 'error');
-    if (currentView === 'cloud') renderCloud();
-  }
-}
-
-async function cloudBackupAll() {
-  const dests = getDestinations();
-  if (dests.length === 0) { showToast('没有配置备份目的地', 'error'); return; }
-  for (const dest of dests) {
-    await cloudBackupTo(dest.id);
-  }
-}
-
-async function cloudRestoreFrom(destId) {
-  const dests = getDestinations();
-  const dest = dests.find(d => d.id === destId);
-  if (!dest) { showToast('备份目的地不存在', 'error'); return; }
-  try {
-    const filePath = `data/backup-${dest.id}.json`;
-    const fileData = await gitReadFile(dest, filePath);
-    if (!fileData) throw new Error('云端无备份数据');
-
-    const decoded = decodeURIComponent(escape(atob(fileData.content)));
-    const refs = JSON.parse(decoded);
-    if (!Array.isArray(refs)) throw new Error('备份数据格式不正确');
-
-    const existingIds = new Set(allRefs.map(r => r.id));
-    let added = 0, updated = 0;
-    for (const ref of refs) {
-      if (existingIds.has(ref.id)) {
-        const idx = allRefs.findIndex(r => r.id === ref.id);
-        allRefs[idx] = ref;
-        updated++;
-      } else {
-        allRefs.push(ref);
-        added++;
-      }
-      await dbAddOrUpdate(ref);
-    }
-    addBackupHistory(dest.name, '恢复', `成功: 新增${added}条, 更新${updated}条`, new Date().toISOString());
-    showToast(`${dest.name} 恢复成功: 新增 ${added} 条, 更新 ${updated} 条`, 'success');
-    refreshUI();
-    if (currentView === 'cloud') renderCloud();
-  } catch(e) {
-    addBackupHistory(dest.name || '未知', '恢复', '失败: ' + e.message, new Date().toISOString());
-    showToast(`${dest.name || '目的地'} 恢复失败: ${e.message}`, 'error');
-    if (currentView === 'cloud') renderCloud();
-  }
-}
-
-async function cloudReplaceFrom(destId) {
-  const dests = getDestinations();
-  const dest = dests.find(d => d.id === destId);
-  if (!dest) { showToast('备份目的地不存在', 'error'); return; }
-  if (!confirm(`⚠️ 这将用 ${dest.name} 的云端数据完全替换本地数据，本地新增但未备份的文献将丢失！\n\n确定继续？`)) return;
-  try {
-    const filePath = `data/backup-${dest.id}.json`;
-    const fileData = await gitReadFile(dest, filePath);
-    if (!fileData) throw new Error('云端无备份数据');
-
-    const decoded = decodeURIComponent(escape(atob(fileData.content)));
-    const refs = JSON.parse(decoded);
-    if (!Array.isArray(refs)) throw new Error('备份数据格式不正确');
-
-    await dbClear();
-    allRefs = refs;
-    for (const ref of refs) await dbAddOrUpdate(ref);
-    addBackupHistory(dest.name, '完全替换', `成功: ${refs.length}条`, new Date().toISOString());
-    showToast(`${dest.name} 完全替换成功: ${refs.length} 条文献`, 'success');
-    refreshUI();
-    if (currentView === 'cloud') renderCloud();
-  } catch(e) {
-    addBackupHistory(dest.name || '未知', '完全替换', '失败: ' + e.message, new Date().toISOString());
-    showToast(`${dest.name || '目的地'} 替换失败: ${e.message}`, 'error');
-  }
-}
 
 async function dbAddOrUpdate(ref) {
   if (useLocalStorage) {
@@ -2023,11 +1923,14 @@ async function dbAddOrUpdate(ref) {
 let autoBackupTimer = null;
 function startAutoBackup() {
   if (autoBackupTimer) clearInterval(autoBackupTimer);
-  const autoIds = getAutoDestIds();
+  // 使用 window.getAutoDestIds 以确保调用模块版本
+  const autoIds = (typeof window.getAutoDestIds === 'function') ? window.getAutoDestIds() : [];
   if (autoIds.length > 0) {
     autoBackupTimer = setInterval(() => {
       if (allRefs.length > 0) {
-        for (const id of autoIds) cloudBackupTo(id);
+        for (const id of autoIds) {
+          if (typeof window.cloudBackupTo === 'function') window.cloudBackupTo(id);
+        }
       }
     }, 5 * 60 * 1000);
   }
@@ -2035,37 +1938,45 @@ function startAutoBackup() {
 
 function renderCloud() {
   const content = document.getElementById('content');
-  const dests = getDestinations();
-  const autoIds = getAutoDestIds();
-  const hist = getBackupHistory();
+  // 使用 window.getDestinations 以确保调用模块版本
+  const dests = (typeof window.getDestinations === 'function') ? window.getDestinations() : [];
+  const autoIds = (typeof window.getAutoDestIds === 'function') ? window.getAutoDestIds() : [];
+  const hist = (typeof window.getBackupHistory === 'function') ? window.getBackupHistory() : [];
 
   let destsHtml = '';
   if (dests.length > 0) {
     destsHtml = dests.map(d => {
-      const plat = PLATFORMS[d.platform];
+      const plat = PLATFORMS[d.platform] || { name: d.platform, icon: '☁️', color: '#6b7280' };
       const isAuto = autoIds.includes(d.id);
       const lastTime = d.lastBackup ? new Date(d.lastBackup).toLocaleString('zh-CN') : '从未备份';
+      const hasToken = (typeof window.hasDestinationToken === 'function') && window.hasDestinationToken(d.id);
+      const tokenStatus = hasToken
+        ? '<span style="font-size:11px;color:#16a34a;">✅ 本次会话已解锁</span>'
+        : `<button class="btn btn-sm btn-ghost" onclick="window.unlockBackupDestination('${d.id}')">🔑 输入 Token</button>`;
       return `
         <div class="dest-card" data-dest-id="${d.id}">
           <div class="dest-header">
             <span class="dest-icon" style="background:${plat.color}">${plat.icon}</span>
             <div class="dest-info">
               <div class="dest-name">${escapeHtml(d.name || plat.name)}</div>
-              <div class="dest-repo">${escapeHtml(d.repo)} · ${plat.name}</div>
+              <div class="dest-repo">${escapeHtml(d.repo)} · ${plat.name} · 分支: ${escapeHtml(d.branch || 'main')}</div>
               <div class="dest-meta">上次备份: ${lastTime}</div>
             </div>
             <div class="dest-actions">
-              <button class="btn btn-sm btn-primary" onclick="cloudBackupTo('${d.id}')">⬆️ 备份</button>
-              <button class="btn btn-sm btn-secondary" onclick="cloudRestoreFrom('${d.id}')">⬇️ 恢复</button>
-              <button class="btn btn-sm btn-danger" onclick="cloudReplaceFrom('${d.id}')">🔄 替换</button>
-              <button class="btn btn-sm btn-ghost" onclick="removeDest('${d.id}')">✕</button>
+              <button class="btn btn-sm btn-primary" onclick="window.cloudBackupTo('${d.id}')">⬆️ 备份</button>
+              <button class="btn btn-sm btn-secondary" onclick="window.cloudRestoreFrom('${d.id}')">⬇️ 恢复</button>
+              <button class="btn btn-sm btn-danger" onclick="window.cloudReplaceFrom('${d.id}')">🔄 替换</button>
+              <button class="btn btn-sm btn-ghost" onclick="window.removeDest('${d.id}')">✕</button>
             </div>
           </div>
           <div class="dest-footer">
-            <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
-              <input type="checkbox" ${isAuto ? 'checked' : ''} onchange="toggleAutoDest('${d.id}', this.checked)">
-              自动备份（每5分钟）
-            </label>
+            <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+              <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+                <input type="checkbox" ${isAuto ? 'checked' : ''} onchange="window.toggleAutoDest('${d.id}', this.checked)">
+                自动备份（每5分钟）
+              </label>
+              ${tokenStatus}
+            </div>
           </div>
         </div>`;
     }).join('');
@@ -2091,23 +2002,27 @@ function renderCloud() {
         <input type="text" id="addDestRepo" placeholder="用户名/仓库名，如 lc19960323-dot/reference-library">
       </div>
       <div class="cloud-form-group">
+        <label>分支</label>
+        <input type="text" id="addDestBranch" value="main" placeholder="GitHub/GitLab 默认 main，Gitee 可填 master">
+      </div>
+      <div class="cloud-form-group">
         <label>Personal Access Token</label>
-        <input type="password" id="addDestToken" placeholder="输入你的 Token">
+        <input type="password" id="addDestToken" placeholder="输入你的 Token（不会保存到本地）">
         <div class="token-help" id="tokenHelp">
-          <a href="https://github.com/settings/tokens?type=beta" target="_blank" style="color:var(--primary)">创建 GitHub Token →</a>
+          <a href="https://github.com/settings/tokens?type=beta" target="_blank" rel="noopener" style="color:var(--primary)">创建 GitHub Token →</a>
           · 需要 Contents: Read & Write 权限
         </div>
       </div>
       <div class="cloud-btn-row">
-        <button class="btn btn-primary" onclick="addDest()">添加目的地</button>
-        <button class="btn btn-secondary" onclick="testNewDest()">测试连接</button>
+        <button class="btn btn-primary" onclick="window.addBackupDestinationSecurely()">添加目的地</button>
+        <button class="btn btn-secondary" onclick="window.testNewDest()">测试连接</button>
       </div>
     </div>`;
 
   let histHtml = '';
   if (hist.length > 0) {
     histHtml = '<ul class="cloud-history">' + hist.slice(0, 15).map(h =>
-      `<li><span class="hist-dest">${escapeHtml(h.destName || '')}</span> ${new Date(h.time).toLocaleString('zh-CN')} — ${h.action}: ${h.status}</li>`
+      `<li><span class="hist-dest">${escapeHtml(h.destinationName || h.destName || '')}</span> ${new Date(h.time).toLocaleString('zh-CN')} — ${escapeHtml(h.action)}: ${escapeHtml(h.status)} ${escapeHtml(h.detail || '')}</li>`
     ).join('') + '</ul>';
   } else {
     histHtml = '<div style="font-size:13px;color:var(--text-muted)">暂无操作记录</div>';
@@ -2123,8 +2038,8 @@ function renderCloud() {
       </div>
 
       <div class="cloud-warning">
-        <strong>⚠️ 安全提醒：</strong>Token 存储在浏览器本地，请不要在公共电脑上保存。
-        公开仓库的备份数据任何人可查看——请勿备份包含敏感信息的文献笔记。
+        <strong>🔒 安全提醒：</strong>Token 仅保存在当前页面内存中，刷新后需要重新输入。
+        备份文件固定存储于 <code>data/library.json</code>，带 SHA-256 校验值。
       </div>
     </div>
 
@@ -2132,11 +2047,11 @@ function renderCloud() {
       <h3 style="margin-bottom:12px">备份目的地</h3>
       ${destsHtml}
       <div class="cloud-btn-row" style="margin-top:12px">
-        <button class="btn btn-primary" onclick="cloudBackupAll()">⬆️ 一键备份全部</button>
+        <button class="btn btn-primary" onclick="window.cloudBackupAll()">⬆️ 一键备份全部</button>
       </div>
       <div style="font-size:12px;color:var(--text-muted);margin-top:8px">
         当前本地有 <strong>${allRefs.length}</strong> 条文献。
-        <strong>合并恢复：</strong>云端新增文献添加到本地，不删除本地数据。
+        <strong>合并恢复：</strong>云端新增文献添加到本地，冲突记录不会自动覆盖。
         <strong>完全替换：</strong>用云端数据覆盖本地，本地未备份数据将丢失。
       </div>
     </div>
@@ -2153,87 +2068,17 @@ function renderCloud() {
 function onPlatformChange() {
   const plat = document.getElementById('addDestPlatform').value;
   const help = document.getElementById('tokenHelp');
+  const branchInput = document.getElementById('addDestBranch');
   if (plat === 'github') {
-    help.innerHTML = `<a href="https://github.com/settings/tokens?type=beta" target="_blank" style="color:var(--primary)">创建 GitHub Token →</a> · 需要 Contents: Read & Write 权限`;
+    help.innerHTML = `<a href="https://github.com/settings/tokens?type=beta" target="_blank" rel="noopener" style="color:var(--primary)">创建 GitHub Token →</a> · 需要 Contents: Read & Write 权限`;
+    if (branchInput) branchInput.value = 'main';
   } else if (plat === 'gitee') {
-    help.innerHTML = `<a href="https://gitee.com/profile/personal_access_tokens" target="_blank" style="color:var(--primary)">创建 Gitee Token →</a> · 需要 projects 权限`;
+    help.innerHTML = `<a href="https://gitee.com/profile/personal_access_tokens" target="_blank" rel="noopener" style="color:var(--primary)">创建 Gitee Token →</a> · 需要 projects 权限`;
+    if (branchInput) branchInput.value = 'master';
   } else if (plat === 'gitlab') {
-    help.innerHTML = `<a href="https://gitlab.com/-/user_settings/personal_access_tokens" target="_blank" style="color:var(--primary)">创建 GitLab Token →</a> · 需要 api 权限`;
+    help.innerHTML = `<a href="https://gitlab.com/-/user_settings/personal_access_tokens" target="_blank" rel="noopener" style="color:var(--primary)">创建 GitLab Token →</a> · 需要 api 权限`;
+    if (branchInput) branchInput.value = 'main';
   }
-}
-
-function addDest() {
-  const platform = document.getElementById('addDestPlatform').value;
-  const name = document.getElementById('addDestName').value.trim() || PLATFORMS[platform].name;
-  const repo = document.getElementById('addDestRepo').value.trim();
-  const token = document.getElementById('addDestToken').value.trim();
-  if (!repo || !token) { showToast('请填写仓库和 Token', 'error'); return; }
-  const dests = getDestinations();
-  if (dests.find(d => d.repo === repo && d.platform === platform)) {
-    showToast('该目的地已存在', 'error'); return;
-  }
-  dests.push({ id: 'dest_' + Date.now(), platform, name, repo, token, lastBackup: null });
-  saveDestinations(dests);
-  showToast(`已添加 ${name}`, 'success');
-  renderCloud();
-}
-
-function removeDest(destId) {
-  const dests = getDestinations();
-  const dest = dests.find(d => d.id === destId);
-  if (!dest) return;
-  if (!confirm(`确定删除备份目的地「${dest.name}」？\n（云端备份数据不会被删除，只是不再从此处备份/恢复）`)) return;
-  const newDests = dests.filter(d => d.id !== destId);
-  saveDestinations(newDests);
-  const autoIds = getAutoDestIds().filter(id => id !== destId);
-  saveAutoDestIds(autoIds);
-  startAutoBackup();
-  showToast(`已删除 ${dest.name}`, 'success');
-  renderCloud();
-}
-
-async function testNewDest() {
-  const platform = document.getElementById('addDestPlatform').value;
-  const repo = document.getElementById('addDestRepo').value.trim();
-  const token = document.getElementById('addDestToken').value.trim();
-  if (!repo || !token) { showToast('请填写仓库和 Token', 'error'); return; }
-  try {
-    const plat = PLATFORMS[platform];
-    let url, headers;
-    if (platform === 'gitlab') {
-      url = `${plat.apiBase}/projects/${encodeURIComponent(repo)}`;
-      headers = { 'PRIVATE-TOKEN': token };
-    } else if (platform === 'gitee') {
-      url = `${plat.apiBase}/repos/${repo}`;
-      headers = { 'Authorization': `token ${token}` };
-    } else {
-      url = `${plat.apiBase}/repos/${repo}`;
-      headers = { 'Authorization': `token ${token}`, 'Accept': 'application/vnd.github.v3+json' };
-    }
-    const res = await fetch(url, { headers });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ message: res.statusText }));
-      throw new Error(err.message || `HTTP ${res.status}`);
-    }
-    const data = await res.json();
-    const repoName = platform === 'gitlab' ? data.path_with_namespace : data.full_name;
-    const isPrivate = platform === 'gitlab' ? !data.public : data.private;
-    showToast(`连接成功！仓库: ${repoName} (${isPrivate ? '私有' : '公开'})`, 'success');
-  } catch(e) {
-    showToast('连接失败: ' + e.message, 'error');
-  }
-}
-
-function toggleAutoDest(destId, enabled) {
-  let autoIds = getAutoDestIds();
-  if (enabled) {
-    if (!autoIds.includes(destId)) autoIds.push(destId);
-  } else {
-    autoIds = autoIds.filter(id => id !== destId);
-  }
-  saveAutoDestIds(autoIds);
-  startAutoBackup();
-  showToast(enabled ? '自动备份已启用' : '自动备份已禁用', 'success');
 }
 
 // ========== Add/Edit ==========
@@ -2399,7 +2244,9 @@ function saveReference() {
   if (editingId) {
     ref.id = editingId;
     ref.created_at = allRefs.find(r => r.id === editingId)?.created_at || new Date().toISOString();
-    ref.updated_at = new Date().toISOString();
+    ref.updatedAt = new Date().toISOString();
+    ref.createdAt = ref.created_at;
+    ref.updated_at = ref.updatedAt;
     dbPut(ref).then(() => {
       const idx = allRefs.findIndex(r => r.id === editingId);
       allRefs[idx] = ref;
@@ -2411,6 +2258,8 @@ function saveReference() {
     ref.id = uuid();
     ref.created_at = new Date().toISOString();
     ref.updated_at = ref.created_at;
+    ref.createdAt = ref.created_at;
+    ref.updatedAt = ref.updated_at;
     dbAdd(ref).then(() => {
       allRefs.push(ref);
       closeModal('editModal');
@@ -3071,87 +2920,14 @@ function handlePdfSelect(e) {
   }
 }
 
+// PDF 处理已迁移至 js/pdf-parser.js + js/pdf-preview.js 模块。
+// 此函数作为桥接，调用 window.parsePdfSecurely（由 integration.js 暴露）。
 async function processPdf(file) {
-  const progress = document.getElementById('pdfProgress');
-  const progressText = document.getElementById('pdfProgressText');
-  const progressFill = document.getElementById('pdfProgressFill');
-  if (!progress) return;
-
-  progress.classList.add('show');
-  progressText.textContent = '正在读取 PDF...';
-  progressFill.style.width = '10%';
-
-  try {
-    const arrayBuffer = await file.arrayBuffer();
-    progressText.textContent = '正在解析 PDF 内容...';
-    progressFill.style.width = '20%';
-
-    const pdfjsLib = await loadPdfJs();
-    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-
-    // Extract text lines from first page (with position info)
-    progressText.textContent = '正在提取文本...';
-    progressFill.style.width = '40%';
-
-    const page1 = await pdf.getPage(1);
-    const tc1 = await page1.getTextContent();
-
-    // Build structured lines: group text items by Y-coordinate
-    const items = tc1.items.filter(it => it.str && it.str.trim()).sort((a, b) => b.transform[5] - a.transform[5] || a.transform[4] - b.transform[4]);
-    const pageLines = [];
-    let cur = null;
-    for (const it of items) {
-      const y = Math.round(it.transform[5]);
-      if (!cur || Math.abs(y - cur.y) > 2) {
-        if (cur) pageLines.push(cur);
-        cur = { y, text: cleanPdfText(it.str.trim()), fontSize: Math.abs(it.transform[3] || 12) };
-      } else {
-        cur.text += cleanPdfText(' ' + it.str.trim());
-      }
-    }
-    if (cur) pageLines.push(cur);
-    // Also clean the assembled line text
-    for (const pl of pageLines) pl.text = cleanPdfText(pl.text);
-
-    // Full text from first 3 pages + last page for regex-based extraction
-    let fullText = '';
-    const pagesToRead = Math.min(pdf.numPages, 3);
-    for (let i = 1; i <= pagesToRead; i++) {
-      const pg = await pdf.getPage(i);
-      const tc = await pg.getTextContent();
-      fullText += cleanPdfText(tc.items.map(it => it.str).join(' ')) + '\n\n';
-    }
-    // Also read last page for ending page number and publication info
-    if (pdf.numPages > pagesToRead) {
-      try {
-        const lastPg = await pdf.getPage(pdf.numPages);
-        const lastTc = await lastPg.getTextContent();
-        fullText += cleanPdfText(lastTc.items.map(it => it.str).join(' ')) + '\n\n';
-      } catch(e) {}
-    }
-
-    progressText.textContent = '正在智能识别...';
-    progressFill.style.width = '60%';
-
-    // Smart pre-fill: combine structural + regex + PDF metadata
-    const prefill = await smartPrefillPdf(pageLines, fullText, pdf);
-
-    progressFill.style.width = '90%';
-
-    showPdfPickerPanel(pageLines, prefill);
-
-    progressFill.style.width = '100%';
-    progressFill.style.background = '#22c55e';
-    progressText.textContent = '✅ PDF 文本已提取并预填';
-
-    showToast('请在面板中确认/修正预填信息，或用DOI/标题搜索', 'success');
-
-  } catch(e) {
-    console.error('PDF parse error:', e);
-    progressText.textContent = '❌ PDF 解析失败: ' + e.message;
-    progressFill.style.background = '#ef4444';
-    showToast('PDF 解析失败，请手动填写信息', 'error');
+  if (typeof window.parsePdfSecurely === 'function') {
+    return window.parsePdfSecurely(file);
   }
+  // 回退：如果模块尚未加载，提示用户
+  showToast('PDF 解析模块加载中，请稍后重试', 'error');
 }
 
 // ========== Smart Pre-fill Algorithm (v2: Academic Format Aware) ==========
@@ -7027,24 +6803,19 @@ async function init() {
 
 init();
 
-// ========== PWA Support (DISABLED - was causing stale cache) ==========
-// Unregister any existing Service Worker and clear all caches
-if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.getRegistrations().then(registrations => {
-    registrations.forEach(reg => {
-      console.log('[PWA] Unregistering Service Worker:', reg.scope);
-      reg.unregister();
+// ========== PWA Support ==========
+// Service Worker 注册由 js/integration.js 处理（使用相对路径 ./sw.js）
+// 此处仅保留清除旧版 SW 缓存的迁移逻辑
+if ('serviceWorker' in navigator && 'caches' in window) {
+  // 清除旧版缓存名称（reflib-v2 等），新 SW 使用 reference-library-v2
+  caches.keys().then(keys => {
+    keys.forEach(key => {
+      if (key !== 'reference-library-v2') {
+        console.log('[PWA] Clearing old cache:', key);
+        caches.delete(key);
+      }
     });
   });
-  // Clear all caches
-  if ('caches' in window) {
-    caches.keys().then(keys => {
-      keys.forEach(key => {
-        console.log('[PWA] Deleting cache:', key);
-        caches.delete(key);
-      });
-    });
-  }
 }
 
 // PWA Install Prompt
@@ -7078,5 +6849,6 @@ document.getElementById('pwaDismissBtn')?.addEventListener('click', () => {
   localStorage.setItem('pwa_dismissed', '1');
 });
 </script>
+<script type="module" src="./js/integration.js"></script>
 </body>
 </html>
