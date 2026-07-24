@@ -1,0 +1,11 @@
+name = "cors-proxy-reference-library"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+
+# Deploy instructions:
+# 1. Create a free Cloudflare account: https://dash.cloudflare.com/sign-up
+# 2. Install wrangler CLI: npm install -g wrangler
+# 3. Login: wrangler login
+# 4. Deploy: wrangler deploy
+# 5. The Worker URL will be: https://cors-proxy-reference-library.YOUR-SUBDOMAIN.workers.dev
+# 6. Put that URL in the reference-library app config

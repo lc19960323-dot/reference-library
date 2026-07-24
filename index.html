@@ -3204,107 +3204,168 @@ async function smartPrefillPdf(pageLines, fullText, pdf) {
     }
   }
 
-  // Volume/Issue/Pages
-  // Western format: Vol. 33, No. 2, Issue 4 — number comes AFTER the keyword
-  const volMatch = fullText.match(/(?:Vol\.?\s*|Volume\s*)[:\s]*(\d+)/i);
-  if (volMatch) result.volume = volMatch[1];
-  const issueMatch = fullText.match(/(?:No\.?\s*|Issue\s*|Number\s*)[:\s]*(\d+|[A-Z])/i);
-  if (issueMatch) result.issue = issueMatch[1];
-  const pagesMatch = fullText.match(/(?:pp\.?\s*|pages\s*|\s)(\d+\s*[-–—]\s*\d+)/i);
-  if (pagesMatch) result.pages = pagesMatch[1].replace(/\s/g, '');
+  // === Volume/Issue/Pages Extraction (Priority-ordered, context-aware) ===
+  // Build first-page text for header/footer context analysis
+  const firstPageText = pageLines.map(l => l.text).join('\n');
 
-  // Chinese format: 第33期, 第三十三期, 第33卷, 第三十三卷
-  // The number is BETWEEN 第 and 期/卷 (NOT after)
-  if (!result.volume) {
-    const cnVolMatch = fullText.match(/第\s*(\d+|[一二三四五六七八九十百千零〇兩]+)\s*卷/);
-    if (cnVolMatch) {
-      const v = /^\d+$/.test(cnVolMatch[1]) ? parseInt(cnVolMatch[1]) : chineseToNumber(cnVolMatch[1]);
-      if (v > 0) result.volume = String(v);
-      console.log('[PDF] Extracted volume from 第X卷:', cnVolMatch[0], '→', v);
-    }
-  }
-  if (!result.issue) {
-    const cnIssueMatch2 = fullText.match(/第\s*(\d+|[一二三四五六七八九十百千零〇兩]+)\s*期/);
-    if (cnIssueMatch2) {
-      const iss = /^\d+$/.test(cnIssueMatch2[1]) ? parseInt(cnIssueMatch2[1]) : chineseToNumber(cnIssueMatch2[1]);
-      if (iss > 0) {
-        result.issue = String(iss);
-        // Taiwan journals often use 期 as volume too (e.g., 法制史研究第三十三期 = vol.33)
-        if (!result.volume) result.volume = String(iss);
-        console.log('[PDF] Extracted issue from 第X期:', cnIssueMatch2[0], '→', iss);
+  // PRIORITY 1: Chinese citation format with full context (most reliable)
+  // Supports: 《期刊》第33期（2018）：175-238  or  《期刊》33（2018）：175-238
+  // Also supports Chinese numerals: 《法制史研究》第三十三期（2018）：175-238
+  if (!result.volume || !result.issue || !result.pages) {
+    const cnCitePatterns = [
+      /《([^》]{2,30})》\s*第\s*(\d+|[一二三四五六七八九十百千零〇兩]+)\s*期\s*[（(](\d{4})(?:\.\d+)?[）)]\s*[：:]\s*(\d+\s*[-–—]\s*\d+)/,
+      /《([^》]{2,30})》\s*(\d+|[一二三四五六七八九十百千零〇兩]+)\s*期\s*[（(](\d{4})(?:\.\d+)?[）)]\s*[：:]\s*(\d+\s*[-–—]\s*\d+)/,
+      /《([^》]{2,30})》\s*第\s*(\d+|[一二三四五六七八九十百千零〇兩]+)\s*[（(](\d{4})(?:\.\d+)?[）)]\s*[：:]\s*(\d+\s*[-–—]\s*\d+)/,
+      /《([^》]{2,30})》\s*(\d+|[一二三四五六七八九十百千零〇兩]+)\s*[（(](\d{4})(?:\.\d+)?[）)]\s*[：:]\s*(\d+\s*[-–—]\s*\d+)/,
+    ];
+    for (const pat of cnCitePatterns) {
+      const m = fullText.match(pat);
+      if (m) {
+        const journalName = m[1].trim();
+        if (!result.journal) result.journal = journalName;
+        const numStr = m[2];
+        const num = /^\d+$/.test(numStr) ? parseInt(numStr) : chineseToNumber(numStr);
+        if (num > 0) {
+          // If pattern contains 期 (but not 卷), it's Taiwan issue-as-volume convention
+          if (/期/.test(m[0]) && !/卷/.test(m[0])) {
+            if (!result.issue) result.issue = String(num);
+            if (!result.volume) result.volume = String(num);
+          } else {
+            if (!result.volume) result.volume = String(num);
+          }
+        }
+        if (!result.year) result.year = m[3];
+        if (!result.pages) result.pages = m[4].replace(/\s/g, '');
+        console.log('[PDF] P1 citation format:', m[0]);
+        break;
       }
     }
   }
 
-  // Chinese/Taiwan academic citation format extraction
-  // Pattern: 《期刊名》卷（年）：页码  e.g., 《法制史研究》33（2018）：175-238
-  // Also: 《期刊名》卷（年.月）：页码  e.g., 《法制史研究》33（2018.6）：175-238
-  // Also: 《期刊名》第卷期（年）：页码
-  // Also supports Chinese numerals: 《法制史研究》第三十三期（2018）：175-238
-  const cnCitePattern1 = /《([^》]{2,30})》\s*(?:第)?(\d+|[一二三四五六七八九十百千零〇兩]+)(?:期)?\s*[（(](\d{4})(?:\.\d+)?[）)]\s*[：:]\s*(\d+\s*[-–—]\s*\d+)/;
-  const cnCiteMatch1 = fullText.match(cnCitePattern1);
-  if (cnCiteMatch1) {
-    if (!result.journal) result.journal = cnCiteMatch1[1].trim();
-    const volStr = cnCiteMatch1[2];
-    const volNum = /^\d+$/.test(volStr) ? parseInt(volStr) : chineseToNumber(volStr);
-    if (!result.volume && volNum > 0) result.volume = String(volNum);
-    if (!result.issue && volNum > 0 && /期/.test(cnCiteMatch1[0])) result.issue = String(volNum);
-    if (!result.year) result.year = cnCiteMatch1[3];
-    if (!result.pages) result.pages = cnCiteMatch1[4].replace(/\s/g, '');
-    console.log('[PDF] Found Chinese citation format (journal+vol+year+pages):', cnCiteMatch1[0]);
+  // PRIORITY 2: Chinese 第X卷 / 第X期 (prefer first-page header area)
+  // Searches first page first, then full text as fallback
+  if (!result.volume || !result.issue) {
+    const searchSources = [
+      { label: 'firstPage', text: firstPageText },
+      { label: 'fullText', text: fullText }
+    ];
+    for (const src of searchSources) {
+      if (!result.volume) {
+        const volMatches = [...src.text.matchAll(/第\s*(\d+|[一二三四五六七八九十百千零〇兩]+)\s*卷/g)];
+        if (volMatches.length > 0) {
+          const v = /^\d+$/.test(volMatches[0][1]) ? parseInt(volMatches[0][1]) : chineseToNumber(volMatches[0][1]);
+          if (v > 0) {
+            result.volume = String(v);
+            console.log('[PDF] P2 vol from 第X卷 (' + src.label + '):', volMatches[0][0]);
+          }
+        }
+      }
+      if (!result.issue) {
+        const issueMatches = [...src.text.matchAll(/第\s*(\d+|[一二三四五六七八九十百千零〇兩]+)\s*期/g)];
+        if (issueMatches.length > 0) {
+          const iss = /^\d+$/.test(issueMatches[0][1]) ? parseInt(issueMatches[0][1]) : chineseToNumber(issueMatches[0][1]);
+          if (iss > 0) {
+            result.issue = String(iss);
+            // Taiwan journals often use 期 as volume too (e.g., 法制史研究第三十三期 = vol.33)
+            if (!result.volume) result.volume = String(iss);
+            console.log('[PDF] P2 issue from 第X期 (' + src.label + '):', issueMatches[0][0]);
+          }
+        }
+      }
+      if (result.volume && result.issue) break;
+    }
   }
 
-  // Also try the full citation format: 作者，〈标题〉，《期刊》卷（年）：页码
-  const fullCite = parseCitationFromText(fullText);
-  if (fullCite) {
-    if (!result.journal && fullCite.journal) result.journal = fullCite.journal;
-    if (!result.volume && fullCite.volume) result.volume = fullCite.volume;
-    if (!result.year && fullCite.year) result.year = fullCite.year;
-    if (!result.pages && fullCite.pages) result.pages = fullCite.pages;
-    if (!result.authors && fullCite.author) result.authors = fullCite.author;
-    if (!result.title && fullCite.title) result.title = fullCite.title;
-    console.log('[PDF] Found full citation format in text:', fullCite);
+  // PRIORITY 3: Western Vol./No. (first page only, then header zone of full text)
+  // Only digits after Vol./No. (no more [A-Z] single-letter matches)
+  // No. requires a period to avoid matching "No" in English sentences
+  if (!result.volume || !result.issue) {
+    const volPat = /(?:Vol\.?\s*|Volume\s*)\s*(\d+)/gi;
+    const noPat  = /(?:No\.\s*|Issue\s+|Number\s+)\s*(\d+)/gi;
+    // Try first page first
+    const fpVol = [...firstPageText.matchAll(volPat)];
+    const fpNo  = [...firstPageText.matchAll(noPat)];
+    if (fpVol.length > 0 && !result.volume) {
+      result.volume = fpVol[0][1];
+      console.log('[PDF] P3 vol from Vol. (first page):', fpVol[0][0]);
+    }
+    if (fpNo.length > 0 && !result.issue) {
+      result.issue = fpNo[0][1];
+      console.log('[PDF] P3 issue from No. (first page):', fpNo[0][0]);
+    }
+    // Fallback: header zone (first 30%) of full text
+    if (!result.volume || !result.issue) {
+      const headerZone = Math.floor(fullText.length * 0.3);
+      const ftVol = [...fullText.matchAll(volPat)].filter(m => m.index < headerZone);
+      const ftNo  = [...fullText.matchAll(noPat)].filter(m => m.index < headerZone);
+      if (ftVol.length > 0 && !result.volume) {
+        result.volume = ftVol[0][1];
+        console.log('[PDF] P3 vol from Vol. (header zone):', ftVol[0][0]);
+      }
+      if (ftNo.length > 0 && !result.issue) {
+        result.issue = ftNo[0][1];
+        console.log('[PDF] P3 issue from No. (header zone):', ftNo[0][0]);
+      }
+    }
   }
 
-  // Also search for journal name in 《》 that might not have the full citation pattern
-  // e.g., page headers/footers: 《法制史研究》第33期
+  // PRIORITY 4: Western pages format (pp. X-Y)
+  if (!result.pages) {
+    const pagesMatch = fullText.match(/(?:pp\.?\s*|pages\s*)\s*(\d+\s*[-–—]\s*\d+)/i);
+    if (pagesMatch) {
+      result.pages = pagesMatch[1].replace(/\s/g, '');
+      console.log('[PDF] P4 pages from pp.:', pagesMatch[0]);
+    }
+  }
+
+  // PRIORITY 5: Full citation format: 作者，〈标题〉，《期刊》卷（年）：页码
+  if (!result.volume || !result.issue || !result.pages || !result.journal || !result.title) {
+    const fullCite = parseCitationFromText(fullText);
+    if (fullCite) {
+      if (!result.journal && fullCite.journal) result.journal = fullCite.journal;
+      if (!result.volume && fullCite.volume) result.volume = fullCite.volume;
+      if (!result.year && fullCite.year) result.year = fullCite.year;
+      if (!result.pages && fullCite.pages) result.pages = fullCite.pages;
+      if (!result.authors && fullCite.author) result.authors = fullCite.author;
+      if (!result.title && fullCite.title) result.title = fullCite.title;
+      console.log('[PDF] P5 full citation:', fullCite);
+    }
+  }
+
+  // PRIORITY 6: Journal name in 《》 (standalone, not part of citation)
   if (!result.journal) {
     const journalInText = fullText.match(/《([\u4e00-\u9fff]{2,20})》/);
     if (journalInText) {
       result.journal = journalInText[1];
-      console.log('[PDF] Found journal name in text:', journalInText[1]);
+      console.log('[PDF] P6 journal:', journalInText[1]);
     }
   }
 
-  // Search for year in parentheses after a number (common in Taiwan journal format)
-  // e.g., "33（2018）" or "33(2018)"
-  if (!result.year || !result.volume) {
-    const volYearPattern = /(\d+)\s*[（(](\d{4})[）)]/;
-    const volYearMatch = fullText.match(volYearPattern);
-    if (volYearMatch) {
-      if (!result.volume) result.volume = volYearMatch[1];
-      if (!result.year) result.year = volYearMatch[2];
+  // PRIORITY 7: Volume-Year with strict journal context
+  // Only 《期刊》33（2018）— must be preceded by journal name in 《》
+  // This prevents random "Smith (2018)" patterns from setting volume
+  if (!result.volume) {
+    const volYearWithJournal = fullText.match(/《[^》]{2,20}》\s*(\d+)\s*[（(](\d{4})[）)]/);
+    if (volYearWithJournal) {
+      result.volume = volYearWithJournal[1];
+      if (!result.year) result.year = volYearWithJournal[2];
+      console.log('[PDF] P7 vol from 《journal》N(year):', volYearWithJournal[0]);
     }
   }
 
-  // Search for pages pattern: 数字-数字 near the end of text (footer area)
+  // PRIORITY 8: Bare page range (last resort)
   if (!result.pages) {
     const pagesPattern = /(\d{1,4}\s*[-–—]\s*\d{1,4})/g;
     const allPages = [...fullText.matchAll(pagesPattern)];
     if (allPages.length > 0) {
-      // Take the last page range found (usually in footer)
       const lastPages = allPages[allPages.length - 1][1].replace(/\s/g, '');
-      // Only accept if it looks like page numbers (not too large)
       const [start, end] = lastPages.split(/[-–—]/).map(Number);
       if (start > 0 && end > start && end < 10000) {
         result.pages = lastPages;
+        console.log('[PDF] P8 pages from bare range:', lastPages);
       }
     }
   }
-
-  // Note: Chinese numeral issue extraction (第三十三期 → 33) is now handled
-  // earlier in the unified 第X期/第X卷 extraction block above.
-
   // Extract page numbers from page headers/footers
   // Taiwan journal pattern: "176 《法制史研究》第三十三期" (even pages)
   //                        "清代中央繫獄諸神考 177" (odd pages)

@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>搜索诊断测试</title>
+<style>
+body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 20px auto; padding: 20px; background: #f8fafc; color: #1e293b; }
+h1 { color: #1e40af; }
+h2 { color: #374151; margin-top: 30px; border-bottom: 2px solid #e5e7eb; padding-bottom: 8px; }
+.test-box { background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; padding: 16px; margin: 12px 0; }
+.test-result { margin-top: 10px; padding: 10px; border-radius: 8px; font-size: 13px; white-space: pre-wrap; word-break: break-all; max-height: 400px; overflow-y: auto; }
+.success { background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534; }
+.error { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; }
+.pending { background: #fefce8; border: 1px solid #fde68a; color: #92400e; }
+button { padding: 10px 20px; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600; margin: 4px; }
+.btn-primary { background: #3b82f6; color: #fff; }
+.btn-primary:hover { background: #2563eb; }
+.btn-secondary { background: #6b7280; color: #fff; }
+.input-row { display: flex; gap: 8px; align-items: center; margin: 10px 0; }
+.input-row input { flex: 1; padding: 8px 12px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 14px; }
+.meta-tag { display: inline-block; padding: 2px 8px; margin: 2px; background: #e0f2fe; border: 1px solid #7dd3fc; border-radius: 4px; font-size: 12px; color: #075985; }
+.status-badge { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+.status-ok { background: #dcfce7; color: #166534; }
+.status-fail { background: #fee2e2; color: #991b1b; }
+.status-pending { background: #fef3c7; color: #92400e; }
+</style>
+</head>
+<body>
+<h1>搜索功能诊断测试</h1>
+<p>此页面测试参考图书馆的搜索功能各环节是否正常工作。</p>
+
+<div class="input-row">
+  <input type="text" id="searchQuery" value="陈熙远 清代中央繫獄諸神考" placeholder="搜索关键词">
+  <button class="btn-primary" onclick="runAllTests()">运行全部测试</button>
+</div>
+
+<div id="testResults"></div>
+
+<script>
+const WORKER_URL = 'https://cors-proxy-reference-library.lc83477977.workers.dev';
+
+function log(testId, message, type = 'pending') {
+  const el = document.getElementById(testId);
+  if (el) {
+    el.className = 'test-result ' + type;
+    el.textContent += message + '\n';
+    el.scrollTop = el.scrollHeight;
+  }
+}
+
+function clearLog(testId) {
+  const el = document.getElementById(testId);
+  if (el) {
+    el.className = 'test-result pending';
+    el.textContent = '';
+  }
+}
+
+function setBadge(testId, status) {
+  const badge = document.getElementById(testId + '_badge');
+  if (badge) {
+    badge.className = 'status-badge status-' + status;
+    badge.textContent = status === 'ok' ? '✓ 通过' : status === 'fail' ? '✗ 失败' : '⏳ 运行中';
+  }
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
+  const controller = new AbortController();
+  const timerId = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(url, { ...options, signal: controller.signal })
+    .then(res => { clearTimeout(timerId); return res; })
+    .catch(err => { clearTimeout(timerId); throw err; });
+}
+
+async function fetchViaProxy(targetUrl, timeoutMs = 15000) {
+  // 1. Try Cloudflare Worker
+  if (WORKER_URL) {
+    try {
+      const workerUrl = WORKER_URL + '/?url=' + encodeURIComponent(targetUrl);
+      const res = await fetchWithTimeout(workerUrl, {}, timeoutMs);
+      if (res.ok) {
+        const text = await res.text();
+        if (text.length > 50 && !text.startsWith('{"error"')) {
+          return new Response(text, {
+            status: 200,
+            headers: { 'Content-Type': res.headers.get('Content-Type') || 'text/html; charset=utf-8' }
+          });
+        }
+      }
+    } catch(e) {
+      console.log('Worker failed:', e.message);
+    }
+  }
+  throw new Error('All proxies failed');
+}
+
+async function testWorkerHealth() {
+  const testId = 'test_worker';
+  clearLog(testId);
+  setBadge(testId, 'pending');
+  log(testId, '正在测试 Worker 健康检查...');
+  try {
+    const res = await fetchWithTimeout(WORKER_URL + '/health', {}, 10000);
+    const data = await res.json();
+    log(testId, 'Worker 状态: ' + JSON.stringify(data, null, 2), 'success');
+    setBadge(testId, 'ok');
+  } catch(e) {
+    log(testId, '错误: ' + e.message, 'error');
+    setBadge(testId, 'fail');
+  }
+}
+
+async function testBingRSS() {
+  const testId = 'test_bing';
+  clearLog(testId);
+  setBadge(testId, 'pending');
+  const query = document.getElementById('searchQuery').value;
+  log(testId, '正在通过 Worker 搜索 Bing RSS: "' + query + '"');
+  
+  try {
+    const rssUrl = 'https://www.bing.com/search?format=rss&q=' + encodeURIComponent(query);
+    log(testId, 'RSS URL: ' + rssUrl);
+    log(testId, 'Worker URL: ' + WORKER_URL + '/?url=' + encodeURIComponent(rssUrl));
+    
+    const res = await fetchViaProxy(rssUrl, 20000);
+    const xmlText = await res.text();
+    log(testId, '响应长度: ' + xmlText.length + ' 字符');
+    log(testId, '前200字符: ' + xmlText.substring(0, 200));
+    
+    if (xmlText.length < 100) {
+      log(testId, '错误: 响应太短', 'error');
+      setBadge(testId, 'fail');
+      return;
+    }
+    
+    // Parse XML
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(xmlText, 'text/xml');
+    const items = doc.querySelectorAll('item');
+    log(testId, '\n找到 ' + items.length + ' 条搜索结果:');
+    
+    for (let i = 0; i < items.length; i++) {
+      const title = items[i].querySelector('title')?.textContent?.trim() || '';
+      const link = items[i].querySelector('link')?.textContent?.trim() || '';
+      const desc = items[i].querySelector('description')?.textContent?.trim() || '';
+      log(testId, '\n' + (i+1) + '. ' + title);
+      log(testId, '   URL: ' + link);
+      log(testId, '   摘要: ' + desc.substring(0, 150));
+    }
+    
+    if (items.length > 0) {
+      log(testId, '\n✓ Bing RSS 搜索正常工作！', 'success');
+      setBadge(testId, 'ok');
+    } else {
+      log(testId, '\n✗ 搜索返回0条结果', 'error');
+      setBadge(testId, 'fail');
+    }
+  } catch(e) {
+    log(testId, '错误: ' + e.message, 'error');
+    setBadge(testId, 'fail');
+  }
+}
+
+async function testCitationMeta() {
+  const testId = 'test_meta';
+  clearLog(testId);
+  setBadge(testId, 'pending');
+  log(testId, '正在测试从 lawdata.com.tw 提取 citation 元数据...');
+  
+  try {
+    const targetUrl = 'https://lawdata.com.tw/tw/detail.aspx?no=329481';
+    log(testId, '目标 URL: ' + targetUrl);
+    
+    const res = await fetchViaProxy(targetUrl, 20000);
+    const html = await res.text();
+    log(testId, '响应长度: ' + html.length + ' 字符');
+    
+    if (html.length < 200) {
+      log(testId, '错误: 响应太短', 'error');
+      setBadge(testId, 'fail');
+      return;
+    }
+    
+    // Extract citation meta tags using DOMParser
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, 'text/html');
+    
+    const citationFields = [
+      'citation_title', 'citation_author', 'citation_publication_date',
+      'citation_journal_title', 'citation_issue', 'citation_volume',
+      'citation_firstpage', 'citation_lastpage', 'citation_doi',
+      'citation_keywords', 'citation_abstract', 'citation_publisher',
+      'citation_language'
+    ];
+    
+    log(testId, '\n提取到的 citation_* 元数据:');
+    let foundCount = 0;
+    for (const field of citationFields) {
+      const metas = doc.querySelectorAll('meta[name="' + field + '"]');
+      metas.forEach(m => {
+        const content = m.getAttribute('content')?.trim();
+        if (content) {
+          log(testId, '  ' + field + ': ' + content);
+          foundCount++;
+        }
+      });
+    }
+    
+    // Also try prefix match
+    if (foundCount === 0) {
+      log(testId, '\n尝试前缀匹配...');
+      const allMetas = doc.querySelectorAll('meta[name^="citation_"]');
+      log(testId, '找到 ' + allMetas.length + ' 个 citation_* meta 标签');
+      allMetas.forEach(m => {
+        const name = m.getAttribute('name');
+        const content = m.getAttribute('content');
+        log(testId, '  ' + name + ': ' + (content || '').substring(0, 100));
+      });
+    }
+    
+    // Also check page title
+    const pageTitle = doc.querySelector('title')?.textContent?.trim();
+    if (pageTitle) log(testId, '\n页面标题: ' + pageTitle);
+    
+    if (foundCount > 0) {
+      log(testId, '\n✓ Citation 元数据提取正常！共找到 ' + foundCount + ' 个字段', 'success');
+      setBadge(testId, 'ok');
+    } else {
+      log(testId, '\n⚠ 未找到 citation_* 元数据', 'error');
+      setBadge(testId, 'fail');
+    }
+  } catch(e) {
+    log(testId, '错误: ' + e.message, 'error');
+    setBadge(testId, 'fail');
+  }
+}
+
+async function testCitationParse() {
+  const testId = 'test_parse';
+  clearLog(testId);
+  setBadge(testId, 'pending');
+  log(testId, '正在测试中文引用格式解析...');
+  
+  const testCitations = [
+    '陳熙遠，〈清代中央繫獄諸神考〉，《法制史研究》33（2018）：175-238',
+    '陳熙遠，〈清代中央繫獄諸神考〉，《法制史研究》33（2018）：175-238。 Hsi-Yüan Chen, "The Gods in Goal"',
+  ];
+  
+  const citePattern = /([^，,]{2,20})[，,]\s*[〈<]([^〉>]+)[〉>][，,]\s*[《<]([^》>]+)[》>][，,]?\s*(\d+)?[（(](\d{4})[）)](?:[：:](\d+[-–—]\d+))?/;
+  
+  for (const text of testCitations) {
+    log(testId, '\n测试: ' + text.substring(0, 80) + '...');
+    const m = text.match(citePattern);
+    if (m) {
+      log(testId, '  作者: ' + (m[1] || ''));
+      log(testId, '  标题: ' + (m[2] || ''));
+      log(testId, '  期刊: ' + (m[3] || ''));
+      log(testId, '  卷: ' + (m[4] || ''));
+      log(testId, '  年: ' + (m[5] || ''));
+      log(testId, '  页码: ' + (m[6] || ''));
+    } else {
+      log(testId, '  ✗ 未匹配', 'error');
+    }
+  }
+  
+  log(testId, '\n✓ 引用格式解析测试完成', 'success');
+  setBadge(testId, 'ok');
+}
+
+async function testFullSearch() {
+  const testId = 'test_full';
+  clearLog(testId);
+  setBadge(testId, 'pending');
+  const query = document.getElementById('searchQuery').value;
+  log(testId, '正在执行完整搜索流程（Bing RSS + 元数据提取）...');
+  
+  try {
+    // Step 1: Bing RSS search
+    log(testId, '\n--- 步骤 1: Bing RSS 搜索 ---');
+    const rssUrl = 'https://www.bing.com/search?format=rss&q=' + encodeURIComponent(query);
+    const res = await fetchViaProxy(rssUrl, 20000);
+    const xmlText = await res.text();
+    
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(xmlText, 'text/xml');
+    const items = doc.querySelectorAll('item');
+    log(testId, '找到 ' + items.length + ' 条搜索结果');
+    
+    if (items.length === 0) {
+      log(testId, '错误: 搜索无结果', 'error');
+      setBadge(testId, 'fail');
+      return;
+    }
+    
+    // Step 2: Find academic URLs
+    log(testId, '\n--- 步骤 2: 筛选学术数据库链接 ---');
+    const promisingDomains = [
+      'lawdata.com.tw', 'airitilibrary.com', 'sinica.edu.tw',
+      'tandfonline.com', 'jstor.org', 'cambridge.org',
+      'springer.com', 'wiley.com', 'cnki.com.cn'
+    ];
+    
+    const academicUrls = [];
+    for (let i = 0; i < items.length; i++) {
+      const link = items[i].querySelector('link')?.textContent?.trim() || '';
+      const isPromising = promisingDomains.some(d => link.includes(d)) ||
+        link.endsWith('.pdf') || link.includes('/article/') || link.includes('/detail');
+      if (isPromising) {
+        academicUrls.push(link);
+        log(testId, '  ✓ ' + link.substring(0, 80));
+      }
+    }
+    
+    if (academicUrls.length === 0) {
+      log(testId, '未找到学术数据库链接', 'error');
+      setBadge(testId, 'fail');
+      return;
+    }
+    
+    // Step 3: Extract citation meta from first academic URL
+    log(testId, '\n--- 步骤 3: 提取 citation 元数据 ---');
+    for (const url of academicUrls.slice(0, 3)) {
+      log(testId, '\n尝试: ' + url.substring(0, 80));
+      try {
+        const pageRes = await fetchViaProxy(url, 15000);
+        const pageHtml = await pageRes.text();
+        log(testId, '  页面大小: ' + pageHtml.length + ' 字符');
+        
+        if (pageHtml.length < 200) {
+          log(testId, '  页面太短，跳过');
+          continue;
+        }
+        
+        const pageDoc = new DOMParser().parseFromString(pageHtml, 'text/html');
+        const meta = {};
+        const fields = ['citation_title', 'citation_author', 'citation_publication_date',
+          'citation_journal_title', 'citation_issue', 'citation_volume',
+          'citation_firstpage', 'citation_lastpage', 'citation_doi',
+          'citation_keywords', 'citation_abstract', 'citation_publisher'];
+        
+        for (const field of fields) {
+          const m = pageDoc.querySelector('meta[name="' + field + '"]');
+          if (m) {
+            const content = m.getAttribute('content')?.trim();
+            if (content) meta[field] = content;
+          }
+        }
+        
+        if (Object.keys(meta).length > 0) {
+          log(testId, '  ✓ 成功提取元数据:', 'success');
+          for (const [k, v] of Object.entries(meta)) {
+            log(testId, '    ' + k + ': ' + v.substring(0, 100));
+          }
+          
+          log(testId, '\n✓ 完整搜索流程正常工作！', 'success');
+          setBadge(testId, 'ok');
+          return;
+        } else {
+          log(testId, '  未找到 citation_* 元数据');
+        }
+      } catch(e) {
+        log(testId, '  错误: ' + e.message);
+      }
+    }
+    
+    log(testId, '\n⚠ 未能从任何学术页面提取元数据', 'error');
+    setBadge(testId, 'fail');
+  } catch(e) {
+    log(testId, '错误: ' + e.message, 'error');
+    setBadge(testId, 'fail');
+  }
+}
+
+async function runAllTests() {
+  document.getElementById('testResults').innerHTML = `
+    <h2>1. Worker 健康检查 <span id="test_worker_badge" class="status-badge status-pending">⏳ 运行中</span></h2>
+    <div class="test-box">
+      <div id="test_worker" class="test-result pending"></div>
+    </div>
+    
+    <h2>2. Bing RSS 搜索 <span id="test_bing_badge" class="status-badge status-pending">⏳ 运行中</span></h2>
+    <div class="test-box">
+      <div id="test_bing" class="test-result pending"></div>
+    </div>
+    
+    <h2>3. Citation 元数据提取 <span id="test_meta_badge" class="status-badge status-pending">⏳ 运行中</span></h2>
+    <div class="test-box">
+      <div id="test_meta" class="test-result pending"></div>
+    </div>
+    
+    <h2>4. 中文引用格式解析 <span id="test_parse_badge" class="status-badge status-pending">⏳ 运行中</span></h2>
+    <div class="test-box">
+      <div id="test_parse" class="test-result pending"></div>
+    </div>
+    
+    <h2>5. 完整搜索流程 <span id="test_full_badge" class="status-badge status-pending">⏳ 运行中</span></h2>
+    <div class="test-box">
+      <div id="test_full" class="test-result pending"></div>
+    </div>
+  `;
+  
+  // Run tests sequentially
+  await testWorkerHealth();
+  await testBingRSS();
+  await testCitationMeta();
+  await testCitationParse();
+  await testFullSearch();
+}
+
+// Auto-run on page load
+window.addEventListener('load', () => {
+  runAllTests();
+});
+</script>
+</body>
+</html>
