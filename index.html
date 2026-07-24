@@ -814,7 +814,8 @@ function renderIO() {
           1. 在浏览器中打开你的豆瓣豆列页面<br>
           2. 右键 → 查看页面源代码（或按 Ctrl+U）<br>
           3. 全选复制源代码，粘贴到下方文本框<br>
-          4. 点击「解析 HTML」
+          4. 点击「解析 HTML」<br>
+          <span style="color:#6366f1">解析后可点击「补全缺失信息」按钮，通过豆瓣API自动获取作者、出版社、年份等</span>
         </div>
         <div class="cloud-form-group">
           <label>粘贴豆瓣页面 HTML 源代码</label>
@@ -5874,8 +5875,9 @@ async function autoEnrichAndReview(metadata) {
 
 // ========== Douban Import ==========
 async function fetchDoubanList(url) {
-  // Douban blocks CORS, we need a proxy
+  // Douban blocks CORS; try multiple proxies, Cloudflare Worker first (most reliable)
   const proxyUrls = [
+    `${CORS_PROXY_WORKER_URL}/?url=${encodeURIComponent(url)}`,
     `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
     `https://corsproxy.io/?${encodeURIComponent(url)}`
   ];
@@ -5885,65 +5887,203 @@ async function fetchDoubanList(url) {
       const res = await fetchWithTimeout(proxyUrl, {}, 15000);
       if (res.ok) {
         const html = await res.text();
-        return html;
+        if (html && html.length > 200) return html;
       }
-    } catch(e) {
-      continue;
-    }
+    } catch(e) { continue; }
   }
   throw new Error('无法访问豆瓣页面，请尝试粘贴 HTML 方式导入');
 }
 
+// —— Douban suggest API: fetch complete metadata by title ——
+async function fetchDoubanSuggest(title) {
+  const suggestUrl = `https://book.douban.com/j/subject_suggest?q=${encodeURIComponent(title)}`;
+  const proxyUrls = [
+    `${CORS_PROXY_WORKER_URL}/?url=${encodeURIComponent(suggestUrl)}`,
+    `https://api.allorigins.win/raw?url=${encodeURIComponent(suggestUrl)}`,
+    `https://corsproxy.io/?${encodeURIComponent(suggestUrl)}`
+  ];
+  for (const pu of proxyUrls) {
+    try {
+      const res = await fetchWithTimeout(pu, {}, 8000);
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data) && data.length > 0) return data;
+      }
+    } catch(e) { continue; }
+  }
+  return [];
+}
+
+// —— Enrich a parsed book via Douban suggest API — fills missing authors/publisher/year ——
+async function enrichDoubanBookFromApi(book) {
+  if (book.authors && book.publisher && book.year) return book; // already complete
+  const results = await fetchDoubanSuggest(book.title);
+  if (!results || results.length === 0) return book;
+
+  // Pick best match: prefer matching doubanId, then highest title similarity
+  let best = null;
+  if (book.doubanId) best = results.find(r => r.id === book.doubanId);
+  if (!best) {
+    let bestScore = 0;
+    for (const r of results) {
+      if (!r.title) continue;
+      const score = titleSimilarity(book.title, r.title);
+      if (score > bestScore) { bestScore = score; best = r; }
+    }
+    if (!best || bestScore < 0.3) return book;
+  }
+
+  console.log('[Douban Enrich] API match:', best.title, '→ filling gaps for', book.title);
+  if (!book.authors && best.author) book.authors = best.author.split('/')[0].trim();
+  if (!book.publisher && best.publisher) book.publisher = best.publisher;
+  if (!book.year && best.year) {
+    const yr = best.year.match(/(\d{4})/)?.[1];
+    if (yr) book.year = yr;
+  }
+  if (!book.doubanId && best.id) {
+    book.doubanId = best.id;
+    book.doubanUrl = `https://book.douban.com/subject/${best.id}/`;
+  }
+  return book;
+}
+
+// —— Selectors for book item containers (tried in order) ——
+const DOUBAN_ITEM_SELECTORS = [
+  '.doulist-item',           // doulist pages
+  'li.subject-item',         // people's book list (wish/do/collect)
+  '.subject-item',           // variant
+  '.book-item',              // generic
+  'li.subject',              // variant
+  'div.item',                // generic fallback
+  '.list-item',              // alternative
+  'tr.item'                  // table layout
+];
+
+// —— Selectors for the info/pub text within a book item ——
+const DOUBAN_INFO_SELECTORS = [
+  '.abstract',               // doulist pages
+  '.pub',                    // subject-item pages
+  '.info .pub',
+  'p.pub', 'span.pub', 'div.pub',
+  '.meta', 'p.meta',
+  '.book-meta',
+  '.pl2',                    // doulist variant
+  '[class*="pub"]',          // fuzzy match
+  '[class*="abstract"]',
+  '[class*="meta"]',
+  '[class*="info"]'
+];
+
 function parseDoubanHtml(html) {
   const books = [];
-  // Parse Douban book list HTML
   const doc = new DOMParser().parseFromString(html, 'text/html');
+  const seenIds = new Set();
 
-  // Find book items - Douban uses different layouts for different pages
-  const items = doc.querySelectorAll('.subject-item, .book-item, li.subject, div.item');
-  if (items.length === 0) {
-    // Try alternative: look for book links in the page
-    const links = doc.querySelectorAll('a[href*="douban.com/subject/"]');
-    links.forEach(link => {
-      const parent = link.closest('div') || link.parentElement;
-      const titleEl = parent?.querySelector('a.title, h2 a, a[href*="/subject/"]');
-      const infoEl = parent?.querySelector('.pub, p.pub, span.pub, div.pub, .meta, p.meta');
-      const ratingEl = parent?.querySelector('.rating_nums, span.rating_nums');
+  // --- Strategy 1: Find book items via container selectors ---
+  for (const sel of DOUBAN_ITEM_SELECTORS) {
+    const items = doc.querySelectorAll(sel);
+    if (items.length === 0) continue;
 
-      if (titleEl) {
-        const title = titleEl.textContent.trim().replace(/\s+/g, ' ');
-        const info = infoEl ? infoEl.textContent.trim() : '';
-        const rating = ratingEl ? ratingEl.textContent.trim() : '';
-        const doubanId = (titleEl.getAttribute('href') || '').match(/subject\/(\d+)/)?.[1] || '';
-
-        books.push(parseDoubanBookInfo(title, info, rating, doubanId));
-      }
-    });
-  } else {
     items.forEach(item => {
-      const titleEl = item.querySelector('a.title, h2 a, a[href*="/subject/"]');
-      const infoEl = item.querySelector('.pub, p.pub, span.pub, div.pub, .meta, p.meta');
-      const ratingEl = item.querySelector('.rating_nums, span.rating_nums');
+      const titleEl = item.querySelector('a[href*="/subject/"], a.title, h2 a, .title a');
+      if (!titleEl) return;
 
-      if (titleEl) {
-        const title = titleEl.textContent.trim().replace(/\s+/g, ' ');
-        const info = infoEl ? infoEl.textContent.trim() : '';
-        const rating = ratingEl ? ratingEl.textContent.trim() : '';
-        const doubanId = (titleEl.getAttribute('href') || '').match(/subject\/(\d+)/)?.[1] || '';
+      const title = (titleEl.getAttribute('title') || titleEl.textContent).trim().replace(/\s+/g, ' ');
+      if (!title || title.length < 1) return;
 
-        books.push(parseDoubanBookInfo(title, info, rating, doubanId));
+      const href = titleEl.getAttribute('href') || '';
+      const doubanId = href.match(/subject\/(\d+)/)?.[1] || '';
+      if (doubanId && seenIds.has(doubanId)) return;
+      if (doubanId) seenIds.add(doubanId);
+
+      // Try multiple info selectors
+      let info = '';
+      let rating = '';
+      for (const infoSel of DOUBAN_INFO_SELECTORS) {
+        const infoEl = item.querySelector(infoSel);
+        if (infoEl && infoEl.textContent.trim().length > 3) {
+          info = infoEl.textContent.trim().replace(/\s+/g, ' ');
+          break;
+        }
       }
+      const ratingEl = item.querySelector('.rating_nums, span.rating_nums, .rating');
+      if (ratingEl) rating = ratingEl.textContent.trim();
+
+      // Fallback: if info still empty, grab all text from item and try to extract a pub-like line
+      if (!info) {
+        const allText = item.textContent.replace(/\s+/g, ' ').trim();
+        const pubMatch = allText.match(/([^/]{2,}\/[^/]{2,}\/[^/]{2,})/);
+        if (pubMatch) info = pubMatch[1].trim();
+      }
+
+      books.push(parseDoubanBookInfo(title, info, rating, doubanId));
+    });
+
+    if (books.length > 0) break; // Found books with this selector, no need to try more
+  }
+
+  // --- Strategy 2: Fallback — scan all subject links ---
+  if (books.length === 0) {
+    const links = doc.querySelectorAll('a[href*="douban.com/subject/"], a[href*="/subject/"]');
+    links.forEach(link => {
+      const title = (link.getAttribute('title') || link.textContent).trim().replace(/\s+/g, ' ');
+      if (!title || title.length < 2) return;
+
+      const href = link.getAttribute('href') || '';
+      const doubanId = href.match(/subject\/(\d+)/)?.[1] || '';
+      if (doubanId && seenIds.has(doubanId)) return;
+      if (doubanId) seenIds.add(doubanId);
+
+      // Walk up to find a container, then search for info text
+      let container = link.closest('.doulist-item, .subject-item, .item, .list-item, li, div.bd, div.info, tr');
+      if (!container) container = link.parentElement;
+      if (!container) return;
+
+      let info = '';
+      let rating = '';
+      for (const infoSel of DOUBAN_INFO_SELECTORS) {
+        const infoEl = container.querySelector(infoSel);
+        if (infoEl && infoEl.textContent.trim().length > 3) {
+          info = infoEl.textContent.trim().replace(/\s+/g, ' ');
+          break;
+        }
+      }
+      const ratingEl = container.querySelector('.rating_nums, span.rating_nums, .rating');
+      if (ratingEl) rating = ratingEl.textContent.trim();
+
+      // Last resort: look at sibling text
+      if (!info) {
+        const siblingText = container.textContent.replace(/\s+/g, ' ').trim();
+        const pubMatch = siblingText.match(/([^/]{2,}\/[^/]{2,}\/[^/]{2,})/);
+        if (pubMatch) info = pubMatch[1].trim();
+      }
+
+      books.push(parseDoubanBookInfo(title, info, rating, doubanId));
     });
   }
 
-  return books;
+  // Deduplicate by title
+  const seen = new Set();
+  const unique = [];
+  for (const b of books) {
+    const key = b.title.toLowerCase();
+    if (!seen.has(key)) { seen.add(key); unique.push(b); }
+  }
+  return unique;
 }
 
 function parseDoubanBookInfo(title, info, rating, doubanId) {
-  // Parse Douban's book info format: "作者 / 出版社 / 年 / ISBN / 定价"
-  // Or Chinese format: "xxx著 / xxx出版社 / 20xx年 / xxx元"
+  // Clean title: remove Douban subtitle markers like "书名 / 副标题"
+  let cleanTitle = title;
+  // Remove trailing subtitle after " / " if present in title
+  if (cleanTitle.includes(' / ') && cleanTitle.split(' / ').length === 2) {
+    cleanTitle = cleanTitle.split(' / ')[0].trim();
+  }
+  // Remove rating numbers that accidentally ended up in title
+  cleanTitle = cleanTitle.replace(/\s*\(\d+\.\d+\)\s*$/, '').trim();
+
   const book = {
-    title: title.split(' ')[0] || title, // Remove douban subtitle markers
+    title: cleanTitle,
     authors: '',
     publisher: '',
     year: '',
@@ -5952,38 +6092,85 @@ function parseDoubanBookInfo(title, info, rating, doubanId) {
     rating: rating,
     doubanId: doubanId,
     doubanUrl: doubanId ? `https://book.douban.com/subject/${doubanId}/` : '',
-    type: 'book'
+    type: 'book',
+    _needsEnrich: false  // flag: needs API enrichment
   };
 
   if (info) {
-    const parts = info.split('/').map(p => p.trim());
+    // Normalize: split by " / " or "/"
+    const parts = info.split(/\s*\/\s*/).map(p => p.trim()).filter(p => p);
 
-    for (const part of parts) {
-      // Author detection
-      if (part.match(/(?:著|编|译|主编|整理|口述|绘|摄影|撰|撰文|执笔)/) ||
-          part.match(/[A-Z][a-z]+ [A-Z]/) || // English names
-          (part.length <= 20 && !part.match(/^\d/) && !part.match(/出版社|出版|ISBN|定价|¥|￥|元/))) {
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+
+      // --- ISBN detection (highest priority) ---
+      if (part.match(/ISBN/i) || part.match(/^\d{10,13}$/)) {
+        const isbnMatch = part.match(/[\dXx]{10,13}/);
+        if (isbnMatch) book.isbn = isbnMatch[0];
+        continue;
+      }
+
+      // --- Price detection ---
+      if (part.match(/[¥￥元NT\$USD]|CNY|RMB/i) && part.match(/\d/)) {
+        book.price = part;
+        continue;
+      }
+      if (part.match(/^\d+\.\d+$/) && i > 0 && parts[i-1].match(/定价|价格/)) {
+        book.price = part;
+        continue;
+      }
+
+      // --- Year detection ---
+      if (part.match(/(?:18|19|20|21)\d{2}/)) {
+        const year = part.match(/((?:18|19|20|21)\d{2})/)?.[1];
+        if (year) { book.year = year; continue; }
+      }
+
+      // --- Publisher detection ---
+      // Chinese publisher keywords
+      const pubKeywords = /出版社|出版集團|出版集团|出版公司|書局|书局|書店|书店|書林|书林|press|Press|Publishing|publishing|Books|books|印書|印书|刊行|刊|大學|大学/;
+      if (pubKeywords.test(part)) {
+        book.publisher = part.replace(/^[\s,，]+|[\s,，]+$/g, '');
+        continue;
+      }
+
+      // --- Author detection ---
+      // Chinese author markers
+      const authorMarkers = /著|編|编|译|譯|主编|主編|整理|口述|绘|繪|撰|撰文|执笔|執筆|校注|點校|点校|注|譯注|译注|校|選|选|辑|輯|主编|合著|独著|獨著/;
+      if (authorMarkers.test(part)) {
+        // Clean: "（美）詹姆斯·戴维斯 著" → "（美）詹姆斯·戴维斯"
+        let author = part.replace(authorMarkers, '').trim();
+        author = author.replace(/^[\s,，·、]+|[\s,，·、]+$/g, '');
+        if (author && !book.authors) book.authors = author;
+        else if (author) book.authors += ', ' + author;
+        continue;
+      }
+
+      // English / foreign author pattern: "FirstName LastName" or "Name, Name"
+      if (part.match(/^[A-Z][a-z]+(\s+[A-Z][a-z]+)+/) ||
+          part.match(/^[A-Z][a-z]+,\s+[A-Z]/) ||
+          (part.match(/[A-Za-z]/) && part.length >= 3 && part.length <= 40 && !part.match(/^\d/) && !pubKeywords.test(part))) {
         if (!book.authors) book.authors = part;
         else book.authors += ', ' + part;
+        continue;
       }
-      // Publisher detection
-      else if (part.match(/出版社|出版集团|出版公司|书局|书店/)) {
-        book.publisher = part;
-      }
-      // Year detection
-      else if (part.match(/(?:19|20)\d{2}/)) {
-        const year = part.match(/((?:19|20)\d{2})/)?.[1];
-        if (year) book.year = year;
-      }
-      // ISBN detection
-      else if (part.match(/ISBN/i)) {
-        book.isbn = part;
-      }
-      // Price detection
-      else if (part.match(/[¥￥元]/) || part.match(/\d+\.\d+/)) {
-        book.price = part;
+
+      // Chinese author fallback: short non-numeric string without publisher keywords
+      if (part.length >= 2 && part.length <= 25 &&
+          !part.match(/^\d/) &&
+          !pubKeywords.test(part) &&
+          !part.match(/[¥￥元]/)) {
+        // Likely an author name (Chinese)
+        if (!book.authors) book.authors = part;
+        else if (!book.authors.includes(part)) book.authors += ', ' + part;
+        continue;
       }
     }
+  }
+
+  // Flag for API enrichment if critical fields are missing
+  if (!book.authors || !book.publisher || !book.year) {
+    book._needsEnrich = true;
   }
 
   return book;
@@ -6041,41 +6228,104 @@ function renderDoubanPreview(books) {
   const preview = document.getElementById('doubanPreview');
   if (!preview) return;
 
-  preview.innerHTML = books.map((book, i) => `
+  const needsEnrichCount = books.filter(b => b._needsEnrich).length;
+
+  preview.innerHTML = books.map((book, i) => {
+    const missing = [];
+    if (!book.authors) missing.push('作者');
+    if (!book.publisher) missing.push('出版社');
+    if (!book.year) missing.push('年份');
+    const statusBadge = missing.length === 0
+      ? '<span style="color:#22c55e;font-size:11px">✓ 完整</span>'
+      : `<span style="color:#f59e0b;font-size:11px">缺: ${missing.join('、')}</span>`;
+    return `
     <div class="douban-book-item" id="doubanBook_${i}">
       <div class="douban-book-info">
-        <h4>${escapeHtml(book.title)}</h4>
-        <p>作者: ${escapeHtml(book.authors || '未知')} | 出版社: ${escapeHtml(book.publisher || '未知')} | 年份: ${escapeHtml(book.year || '未知')}${book.isbn ? ' | ' + escapeHtml(book.isbn) : ''}</p>
+        <h4>${escapeHtml(book.title)} ${statusBadge}</h4>
+        <p>作者: ${escapeHtml(book.authors || '—')} | 出版社: ${escapeHtml(book.publisher || '—')} | 年份: ${escapeHtml(book.year || '—')}${book.isbn ? ' | ISBN: ' + escapeHtml(book.isbn) : ''}${book.rating ? ' | ⭐' + escapeHtml(book.rating) : ''}</p>
       </div>
-      <div class="douban-book-actions">
+      <div class="douban-book-actions" id="doubanActions_${i}">
         <button class="btn btn-sm btn-primary" onclick="importDoubanBook(${i})">导入</button>
       </div>
-    </div>
-  `).join('') + `
-    <div style="text-align:center;margin-top:16px">
+    </div>`;
+  }).join('') + `
+    <div style="text-align:center;margin-top:16px;display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
+      ${needsEnrichCount > 0 ? `<button class="btn btn-sm" style="background:#6366f1;color:#fff" onclick="enrichAllDoubanBooks()">补全缺失信息 (${needsEnrichCount})</button>` : ''}
       <button class="btn btn-primary" onclick="importAllDoubanBooks()">全部导入 (${books.length})</button>
     </div>
   `;
 
-  // Store books data for import
   window._doubanBooks = books;
+}
+
+// — Batch enrich all books that have missing fields via Douban suggest API —
+async function enrichAllDoubanBooks() {
+  const books = window._doubanBooks;
+  if (!books) return;
+  const toEnrich = books.filter(b => b._needsEnrich);
+  if (toEnrich.length === 0) { showToast('所有书籍信息已完整', ''); return; }
+
+  showToast(`正在通过豆瓣API补全 ${toEnrich.length} 本书的信息…`, '');
+  let enriched = 0;
+  for (let i = 0; i < toEnrich.length; i++) {
+    const book = toEnrich[i];
+    const idx = books.indexOf(book);
+    const actionsEl = document.getElementById(`doubanActions_${idx}`);
+    if (actionsEl) actionsEl.innerHTML = '<span style="color:#6366f1;font-size:12px">⏳ 补全中…</span>';
+
+    try {
+      await enrichDoubanBookFromApi(book);
+      book._needsEnrich = false;
+      enriched++;
+      // Update the preview item
+      const item = document.getElementById(`doubanBook_${idx}`);
+      if (item) {
+        const missing = [];
+        if (!book.authors) missing.push('作者');
+        if (!book.publisher) missing.push('出版社');
+        if (!book.year) missing.push('年份');
+        const statusBadge = missing.length === 0
+          ? '<span style="color:#22c55e;font-size:11px">✓ 完整</span>'
+          : `<span style="color:#f59e0b;font-size:11px">缺: ${missing.join('、')}</span>`;
+        item.querySelector('.douban-book-info').innerHTML =
+          `<h4>${escapeHtml(book.title)} ${statusBadge}</h4>` +
+          `<p>作者: ${escapeHtml(book.authors || '—')} | 出版社: ${escapeHtml(book.publisher || '—')} | 年份: ${escapeHtml(book.year || '—')}${book.isbn ? ' | ISBN: ' + escapeHtml(book.isbn) : ''}${book.rating ? ' | ⭐' + escapeHtml(book.rating) : ''}</p>`;
+        actionsEl.innerHTML = '<button class="btn btn-sm btn-primary" onclick="importDoubanBook(' + idx + ')">导入</button>';
+      }
+    } catch(e) {
+      if (actionsEl) actionsEl.innerHTML = '<button class="btn btn-sm btn-primary" onclick="importDoubanBook(' + idx + ')">导入</button>';
+    }
+    // Small delay to avoid rate limiting
+    if (i < toEnrich.length - 1) await new Promise(r => setTimeout(r, 300));
+  }
+  showToast(`已补全 ${enriched}/${toEnrich.length} 本书的信息`, 'success');
 }
 
 async function importDoubanBook(index) {
   const book = window._doubanBooks?.[index];
   if (!book) return;
 
+  // If book needs enrichment, do it before saving
+  const actionsEl = document.getElementById(`doubanActions_${index}`);
+  if (book._needsEnrich) {
+    if (actionsEl) actionsEl.innerHTML = '<span style="color:#6366f1;font-size:12px">⏳ 补全中…</span>';
+    try {
+      await enrichDoubanBookFromApi(book);
+      book._needsEnrich = false;
+    } catch(e) { /* proceed with whatever we have */ }
+  }
+
   const ref = {
     id: uuid(),
     type: 'book',
     title: book.title,
-    authors: book.authors,
-    publisher: book.publisher,
-    year: book.year,
-    isbn: book.isbn,
+    authors: book.authors || '',
+    publisher: book.publisher || '',
+    year: book.year || '',
+    isbn: book.isbn || '',
     category: '豆瓣书单',
     tags: ['豆瓣'],
-    notes: book.doubanUrl ? `豆瓣链接: ${book.doubanUrl}` + (book.rating ? `\n评分: ${book.rating}` : '') : '',
+    notes: [book.doubanUrl ? `豆瓣链接: ${book.doubanUrl}` : '', book.rating ? `评分: ${book.rating}` : '', book.price ? `定价: ${book.price}` : ''].filter(Boolean).join('\n'),
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString()
   };
@@ -6085,7 +6335,6 @@ async function importDoubanBook(index) {
   showToast(`已导入「${book.title}」`, 'success');
   refreshUI();
 
-  // Update preview to mark as imported
   const item = document.getElementById(`doubanBook_${index}`);
   if (item) {
     item.querySelector('.douban-book-actions').innerHTML = '<span style="color:#22c55e;font-size:13px">✅ 已导入</span>';
@@ -6097,23 +6346,35 @@ async function importAllDoubanBooks() {
   if (!books || books.length === 0) return;
 
   let imported = 0;
+  let enriched = 0;
+  let skipped = 0;
   for (let i = 0; i < books.length; i++) {
     const book = books[i];
-    // Check if already imported by title
     const existing = allRefs.find(r => r.title === book.title && r.type === 'book');
-    if (existing) continue;
+    if (existing) { skipped++; continue; }
+
+    // Enrich if needed
+    if (book._needsEnrich) {
+      const actionsEl = document.getElementById(`doubanActions_${i}`);
+      if (actionsEl) actionsEl.innerHTML = '<span style="color:#6366f1;font-size:12px">⏳ 补全中…</span>';
+      try {
+        await enrichDoubanBookFromApi(book);
+        book._needsEnrich = false;
+        enriched++;
+      } catch(e) { /* proceed */ }
+    }
 
     const ref = {
       id: uuid(),
       type: 'book',
       title: book.title,
-      authors: book.authors,
-      publisher: book.publisher,
-      year: book.year,
-      isbn: book.isbn,
+      authors: book.authors || '',
+      publisher: book.publisher || '',
+      year: book.year || '',
+      isbn: book.isbn || '',
       category: '豆瓣书单',
       tags: ['豆瓣'],
-      notes: book.doubanUrl ? `豆瓣链接: ${book.doubanUrl}` + (book.rating ? `\n评分: ${book.rating}` : '') : '',
+      notes: [book.doubanUrl ? `豆瓣链接: ${book.doubanUrl}` : '', book.rating ? `评分: ${book.rating}` : '', book.price ? `定价: ${book.price}` : ''].filter(Boolean).join('\n'),
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString()
     };
@@ -6121,9 +6382,17 @@ async function importAllDoubanBooks() {
     await dbAddOrUpdate(ref);
     allRefs.push(ref);
     imported++;
+
+    const item = document.getElementById(`doubanBook_${i}`);
+    if (item) {
+      item.querySelector('.douban-book-actions').innerHTML = '<span style="color:#22c55e;font-size:13px">✅ 已导入</span>';
+    }
   }
 
-  showToast(`已导入 ${imported} 本书籍（${books.length - imported} 本已存在）`, 'success');
+  const msg = enriched > 0
+    ? `已导入 ${imported} 本（补全 ${enriched} 本信息，${skipped} 本已存在）`
+    : `已导入 ${imported} 本书籍（${skipped} 本已存在）`;
+  showToast(msg, 'success');
   refreshUI();
 }
 
